@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x64
+            builder: --linux
+          - os: windows-latest
+            platform: win-x64
+            builder: --win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # whisper.cpp не выпускает готовых бинарников, поэтому собираем сами.
+      # GGML_NATIVE=OFF + AVX2: бинарник не привязан к процессору сборочной машины.
+      - name: Build whisper.cpp
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v1.9.5 https://github.com/ggml-org/whisper.cpp whisper-src
+          cmake -S whisper-src -B whisper-src/build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_SERVER=OFF \
+            -DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ runner.os == 'Linux' && '-static-libstdc++ -static-libgcc' || '' }}"
+          cmake --build whisper-src/build --config Release --target whisper-cli -j 4
+          mkdir -p resources/whisper/${{ matrix.platform }}
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp whisper-src/build/bin/Release/whisper-cli.exe resources/whisper/${{ matrix.platform }}/
+            resources/whisper/${{ matrix.platform }}/whisper-cli.exe --help
+          else
+            cp whisper-src/build/bin/whisper-cli resources/whisper/${{ matrix.platform }}/
+            resources/whisper/${{ matrix.platform }}/whisper-cli --help
+          fi
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Package (and publish on tag)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then PUBLISH=always; else PUBLISH=never; fi
+          npx electron-builder ${{ matrix.builder }} --publish $PUBLISH
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        with:
+          name: installer-${{ matrix.platform }}
+          path: |
+            release/*.AppImage
+            release/*.exe

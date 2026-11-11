@@ -1,0 +1,11 @@
+// Шрифты субтитров. Подключаются и в окне приложения (превью), и на странице рендера.
+import '@fontsource-variable/montserrat/wght.css'
+import '@fontsource-variable/commissioner/wght.css'
+import '@fontsource-variable/ibm-plex-sans/wght.css'
+import '@fontsource/arsenal/400.css'
+import '@fontsource/arsenal/700.css'
+import '@fontsource/spectral/400.css'
+import '@fontsource/spectral/600.css'
+import '@fontsource/spectral/700.css'
+import '@fontsource/spectral/800.css'
+import '@fontsource/prata/400.css'

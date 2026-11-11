@@ -1,0 +1,53 @@
+appId: app.kkaprizzz.transsubtitles
+productName: Trans Subtitles
+copyright: Kkaprizzz
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+asar: true
+# нативные модули и бинарники нельзя запускать изнутри asar
+asarUnpack:
+  - "**/node_modules/sherpa-onnx-*/**"
+  - "**/node_modules/ffmpeg-static/ffmpeg*"
+  - "**/node_modules/ffprobe-static/bin/**"
+publish:
+  provider: github
+  owner: Kkaprizzz
+  repo: trans-subtitles
+  releaseType: release
+
+linux:
+  target:
+    - target: AppImage
+      arch: x64
+  category: AudioVideo
+  artifactName: Trans-Subtitles-${version}-linux-x64.${ext}
+  files:
+    - "!**/node_modules/ffprobe-static/bin/{darwin,win32}/**"
+    - "!**/node_modules/ffprobe-static/bin/linux/ia32/**"
+    - "!**/node_modules/sherpa-onnx-{darwin,win,linux-arm}*/**"
+  extraResources:
+    - from: resources/whisper/linux-x64
+      to: whisper
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+  artifactName: Trans-Subtitles-${version}-win-x64-setup.${ext}
+  files:
+    - "!**/node_modules/ffprobe-static/bin/{darwin,linux}/**"
+    - "!**/node_modules/ffprobe-static/bin/win32/ia32/**"
+    - "!**/node_modules/sherpa-onnx-{darwin,linux,win-arm,win-ia}*/**"
+  extraResources:
+    - from: resources/whisper/win-x64
+      to: whisper
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
