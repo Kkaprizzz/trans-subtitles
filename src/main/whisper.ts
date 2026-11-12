@@ -35,6 +35,7 @@ export function transcribeWithWhisper(
   wavPath: string,
   modelFile: string,
   threads: number,
+  dtw: string | undefined,
   onProgress: (v: number) => void
 ): Promise<Word[]> {
   const bin = whisperBinary()
@@ -51,7 +52,12 @@ export function transcribeWithWhisper(
         '-t', String(threads),
         '-ml', '1', '-sow',
         '-ojf', '-of', outBase,
-        '-pp'
+        '-pp',
+        // без подстановки предыдущего текста: иначе на длинных записях Whisper зацикливается
+        // (на 30 минутах: 9.2% ошибок с петлёй «…Внезапно в инстаграм…» → 4.0% без неё)
+        '-mc', '0',
+        // DTW даёт точные границы слов; работает только без flash attention
+        ...(dtw ? ['-dtw', dtw, '-nfa'] : [])
       ],
       {
         stdio: ['ignore', 'ignore', 'pipe'],

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { MediaInfo } from '../shared/types'
 import { FFMPEG, FFPROBE } from './paths'
@@ -26,13 +27,13 @@ interface ProbeStream {
 }
 
 export async function probeMedia(file: string): Promise<MediaInfo> {
-  const raw = await collect(FFPROBE, [
-    '-v', 'error',
-    '-print_format', 'json',
-    '-show_format',
-    '-show_streams',
-    file
-  ])
+  if (!existsSync(file)) throw new Error(`Файл не найден: ${basename(file)}`)
+  let raw: string
+  try {
+    raw = await collect(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file])
+  } catch {
+    throw new Error(`Не удалось прочитать «${basename(file)}»: файл повреждён, не дописан или формат не поддерживается`)
+  }
   const j = JSON.parse(raw) as { format?: { duration?: string }; streams?: ProbeStream[] }
   const streams = j.streams ?? []
   const video = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic)

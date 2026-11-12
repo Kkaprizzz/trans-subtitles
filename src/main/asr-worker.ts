@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Word } from '../shared/types'
+import { correctEdges } from '../shared/words'
 
 const sherpa = require('sherpa-onnx-node')
 
@@ -26,6 +27,13 @@ const FRAME = 320 // 20 мс
 const MAX_CHUNK_SEC = 30
 const MIN_CHUNK_SEC = 15
 const CHAR_DUR = 0.04 // шаг модели
+/**
+ * Систематический сдвиг GigaAM CTC: символ «срабатывает» чуть позже начала звука,
+ * поэтому начало слова двигаем раньше, конец — позже. Подобрано по эталонным границам
+ * слов (забег тестов 2026-11-11): медиана ошибки начала 83 → 32 мс.
+ */
+const EDGE_LEAD = 0.06
+const EDGE_TAIL = 0.04
 
 /** Читает WAV PCM16 моно 16 кГц (формат, который мы сами делаем через ffmpeg) в Float32. */
 function readWav16(path: string): Float32Array {
@@ -150,7 +158,7 @@ function run(msg: RunMsg): void {
     parentPort.postMessage({ type: 'progress', value: (idx + 1) / chunks.length })
   })
 
-  parentPort.postMessage({ type: 'done', words })
+  parentPort.postMessage({ type: 'done', words: correctEdges(words, EDGE_LEAD, EDGE_TAIL) })
 }
 
 parentPort.on('message', (e) => {

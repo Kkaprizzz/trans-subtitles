@@ -1,8 +1,9 @@
-/** 83.456 -> «01:23.45» */
+/** 83.456 -> «01:23.46». Сначала округляем до сотых, иначе 59.999 превращалось в «00:60.00». */
 export function fmtTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0
-  const m = Math.floor(sec / 60)
-  const s = sec - m * 60
+  const cs = Math.round(sec * 100)
+  const m = Math.floor(cs / 6000)
+  const s = (cs - m * 6000) / 100
   return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`
 }
 

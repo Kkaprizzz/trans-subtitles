@@ -35,5 +35,8 @@ npm run dist   # AppImage (Linux) или установщик NSIS (Windows)
 
 ```bash
 npm run typecheck
-npm test
+npm test                                   # юнит-тесты чистой логики
+node scripts/ci-smoke.mjs <собранное приложение>   # дымовой тест сборки: распознавание и рендер
 ```
+
+В CI дымовой тест запускается на Linux и Windows перед упаковкой установщика.

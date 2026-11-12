@@ -55,6 +55,25 @@ jobs:
       - run: npm test
       - run: npm run build
 
+      # Дымовой тест собранного приложения: распознавание (GigaAM, Whisper) и рендер с проверкой кадров.
+      # Сломанная сборка не доходит до релиза.
+      - name: Package to folder
+        shell: bash
+        run: npx electron-builder ${{ matrix.builder }} --dir --publish never
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          ELECTRON_DISABLE_SANDBOX: '1'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q xvfb
+          xvfb-run -a node scripts/ci-smoke.mjs release/linux-unpacked/trans-subtitles
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: node scripts/ci-smoke.mjs "release/win-unpacked/Trans Subtitles.exe"
+
       - name: Package (and publish on tag)
         shell: bash
         env:

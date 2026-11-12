@@ -24,6 +24,8 @@ linux:
     - target: AppImage
       arch: x64
   category: AudioVideo
+  # связывает окно с ярлыком (значок в панели задач)
+  syncDesktopName: true
   artifactName: Trans-Subtitles-${version}-linux-x64.${ext}
   files:
     - "!**/node_modules/ffprobe-static/bin/{darwin,win32}/**"

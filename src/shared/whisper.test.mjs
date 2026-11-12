@@ -56,3 +56,20 @@ const tight = sanitizeWords([
 assert.equal(tight[1].start, 1.5)
 assert.ok(tight[1].end > tight[1].start)
 console.log('whisper.ts: все проверки прошли')
+
+// --- DTW: если у токенов есть t_dtw, границы берутся из него с поправками
+import { DTW_LEAD, DTW_TAIL } from './whisper.ts'
+const dtw = parseWhisperJson({
+  transcription: [
+    { offsets: { from: 0, to: 900 }, text: ' привет', tokens: [{ text: '[_BEG_]', t_dtw: 0 }, { text: ' при', t_dtw: 50 }, { text: 'вет', t_dtw: 70 }] },
+    { offsets: { from: 900, to: 2000 }, text: ' мир', tokens: [{ text: ' мир', t_dtw: 160 }] },
+    { offsets: { from: 2000, to: 2500 }, text: ' без', tokens: [{ text: ' без', t_dtw: -1 }] }
+  ]
+})
+assert.equal(dtw[0].start, +(0.5 - DTW_LEAD).toFixed(3), 'начало = первый токен с буквами минус поправка; служебный [_BEG_] пропущен')
+assert.equal(dtw[0].end, +(0.7 + DTW_TAIL).toFixed(3))
+assert.equal(dtw[1].start, +(1.6 - DTW_LEAD).toFixed(3))
+assert.equal(dtw[2].start, 2.0, 'без DTW — обычные отметки')
+const early = parseWhisperJson({ transcription: [{ offsets: { from: 1000, to: 1500 }, text: ' да', tokens: [{ text: ' да', t_dtw: 105 }] }] })
+assert.equal(early[0].start, 1.0, 'DTW с поправкой не уводит слово раньше начала сегмента')
+console.log('whisper.ts (DTW): все проверки прошли')

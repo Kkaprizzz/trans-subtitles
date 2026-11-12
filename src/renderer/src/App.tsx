@@ -19,6 +19,7 @@ import RenderPanel from './RenderPanel'
 import { loadSettings, resolveSize, STORAGE_KEY as RENDER_KEY, type Settings as RenderSettings } from './renderSettings'
 import StylePanel from './StylePanel'
 import WordEditor from './WordEditor'
+import WordList from './WordList'
 
 type Busy = null | 'download' | 'transcribe' | 'render'
 type Tab = 'words' | 'style' | 'render'
@@ -94,7 +95,6 @@ export default function App(): React.JSX.Element {
   const stageRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<CaptionView | null>(null)
-  const rowRefs = useRef<Array<HTMLButtonElement | null>>([])
   const stopAtRef = useRef<number | null>(null)
   const openEditRef = useRef<(idx: number) => void>(() => {})
 
@@ -278,9 +278,6 @@ export default function App(): React.JSX.Element {
   const shownIdx = caption?.active ?? -1
   const activeIdx = useMemo(() => findActive(words, time), [words, time])
 
-  useEffect(() => {
-    if (activeIdx >= 0) rowRefs.current[activeIdx]?.scrollIntoView({ block: 'nearest' })
-  }, [activeIdx])
 
   const seek = (t: number): void => {
     if (!videoRef.current) return
@@ -288,6 +285,14 @@ export default function App(): React.JSX.Element {
     videoRef.current.currentTime = t
     setTime(t)
   }
+
+  // Стабильный обработчик клика по строке: WordList и строки мемоизированы.
+  const pickRowRef = useRef<(i: number) => void>(() => {})
+  pickRowRef.current = (i) => {
+    setSelected(i)
+    if (words[i]) seek(words[i].start)
+  }
+  const pickRow = useCallback((i: number) => pickRowRef.current(i), [])
 
   // --- правки слов ---
   const sel = selected >= 0 && selected < words.length ? selected : -1
@@ -484,7 +489,12 @@ export default function App(): React.JSX.Element {
             Скачать модель
           </button>
         ) : (
-          <button className="btn primary" onClick={() => void recognize()} disabled={!media || busy !== null}>
+          <button
+            className="btn primary"
+            onClick={() => void recognize()}
+            disabled={!media || !media.hasAudio || busy !== null}
+            title={media && !media.hasAudio ? 'В файле нет звуковой дорожки' : undefined}
+          >
             Распознать
           </button>
         )}
@@ -507,6 +517,14 @@ export default function App(): React.JSX.Element {
                   if (videoRef.current) setTime(videoRef.current.currentTime)
                 }}
                 onSeeked={() => videoRef.current && setTime(videoRef.current.currentTime)}
+                onTimeUpdate={() => {
+                  // запасная проверка остановки «Слово ▸»: rAF замедляется, если окно перекрыто
+                  const v = videoRef.current
+                  if (v && stopAtRef.current !== null && v.currentTime >= stopAtRef.current) {
+                    stopAtRef.current = null
+                    v.pause()
+                  }
+                }}
                 onEnded={() => setPlaying(false)}
                 className={!media.hasVideo ? 'audio-only' : showRender ? 'dimmed' : ''}
               />
@@ -603,28 +621,14 @@ export default function App(): React.JSX.Element {
                 </span>
               </span>
             </div>
-            <div className="word-list" role="list">
-              {words.length === 0 && (
-                <p className="empty">{media ? 'Нажми «Распознать», слова появятся здесь' : 'Пока пусто'}</p>
-              )}
-              {words.map((w, i) => (
-                <button
-                  key={w.id}
-                  ref={(el) => {
-                    rowRefs.current[i] = el
-                  }}
-                  role="listitem"
-                  className={`word-row${i === shownIdx ? ' active' : ''}${i === sel ? ' selected' : ''}`}
-                  onClick={() => {
-                    setSelected(i)
-                    seek(w.start)
-                  }}
-                >
-                  <span className="mono dim">{fmtTime(w.start)}</span>
-                  <span>{w.text}</span>
-                </button>
-              ))}
-            </div>
+            <WordList
+              words={words}
+              shownIdx={shownIdx}
+              selected={sel}
+              scrollIdx={activeIdx}
+              emptyText={media ? 'Нажми «Распознать», слова появятся здесь' : 'Пока пусто'}
+              onPick={pickRow}
+            />
             <WordEditor
               word={sel >= 0 ? words[sel] : null}
               canMerge={sel >= 0 && sel < words.length - 1}

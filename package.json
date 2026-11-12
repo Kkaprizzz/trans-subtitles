@@ -10,7 +10,7 @@
     "dev": "node scripts/run.mjs dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test \"src/shared/*.test.mjs\"",
+    "test": "node --test \"src/**/*.test.mjs\"",
     "dist": "electron-vite build && electron-builder",
     "pack": "electron-vite build && electron-builder --dir"
   },
@@ -47,5 +47,6 @@
     "type": "git",
     "url": "git+https://github.com/Kkaprizzz/trans-subtitles.git"
   },
-  "homepage": "https://github.com/Kkaprizzz/trans-subtitles"
+  "homepage": "https://github.com/Kkaprizzz/trans-subtitles",
+  "desktopName": "trans-subtitles.desktop"
 }

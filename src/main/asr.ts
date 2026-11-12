@@ -4,13 +4,14 @@ import { cpus } from 'node:os'
 import { join } from 'node:path'
 import type { ModelId, ProgressEvent, Word } from '../shared/types'
 import { extractAudio, probeMedia } from './media'
-import { modelDir, modelEngine } from './models'
+import { modelDir, modelDtw, modelEngine } from './models'
 import { transcribeWithWhisper } from './whisper'
 
 type Emit = (e: ProgressEvent) => void
 
 export async function transcribe(mediaPath: string, id: ModelId, emit: Emit): Promise<Word[]> {
   const info = await probeMedia(mediaPath)
+  if (!info.hasAudio) throw new Error('В файле нет звуковой дорожки — распознавать нечего')
   const wav = join(app.getPath('temp'), `trans-subtitles-${Date.now()}.wav`)
 
   try {
@@ -23,7 +24,7 @@ export async function transcribe(mediaPath: string, id: ModelId, emit: Emit): Pr
     const threads = Math.max(2, Math.min(8, Math.floor(cpus().length / 2)))
 
     if (modelEngine(id) === 'whisper') {
-      return await transcribeWithWhisper(wav, join(modelDir(id), 'model.bin'), threads, (v) =>
+      return await transcribeWithWhisper(wav, join(modelDir(id), 'model.bin'), threads, modelDtw(id), (v) =>
         emit({ stage: 'asr', value: v, label: 'Распознаю речь' })
       )
     }

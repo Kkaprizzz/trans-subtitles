@@ -139,7 +139,25 @@ export function createCaptionView(host: HTMLElement): CaptionView {
       plate.appendChild(el)
       wordEls.push(el)
     }
+    reservePopRoom()
     fitText()
+  }
+
+  /**
+   * В подсветке активное слово увеличивается — заранее оставляем по бокам место под рост,
+   * иначе оно наезжает на соседей. Отступ в em, поэтому он масштабируется вместе с подгонкой шрифта.
+   */
+  function reservePopRoom(): void {
+    if (style.mode !== 'highlight' || style.pop <= 1) return
+    fit = 1
+    setSize()
+    const fs = parseFloat(getComputedStyle(block).fontSize)
+    if (!fs) return
+    for (const el of wordEls) {
+      // offsetWidth не зависит от transform (блок может быть ещё масштабирован анимацией появления)
+      const em = ((style.pop - 1) / 2) * (el.offsetWidth / fs)
+      el.style.margin = `0 ${em.toFixed(4)}em`
+    }
   }
 
   function render(state: CaptionState | null): void {
@@ -177,7 +195,8 @@ export function createCaptionView(host: HTMLElement): CaptionView {
       })
     } else {
       letterEls.forEach((el, i) => {
-        el.style.visibility = i < state.typed ? 'visible' : 'hidden'
+        // 'inherit', а не 'visible': иначе буква остаётся видна, когда весь блок скрыт
+        el.style.visibility = i < state.typed ? 'inherit' : 'hidden'
       })
     }
   }

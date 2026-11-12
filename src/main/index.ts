@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, protocol, session, shell } from 'electron'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
@@ -100,6 +100,11 @@ function createWindow(): void {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  // Окно никуда не уходит со своей страницы: иначе перетащенный в окно файл откроется вместо
+  // приложения и получит доступ к window.api (preload подключается к любой странице окна).
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url !== win?.webContents.getURL()) e.preventDefault()
+  })
   if (process.env['ELECTRON_RENDERER_URL']) void win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
 }
@@ -190,16 +195,26 @@ function registerIpc(): void {
   ipcMain.handle('font:allow', (_e, path: string) => allowFontFile(path))
 
   ipcMain.handle('models:list', () => listModels())
-  ipcMain.handle('models:download', (_e, id: ModelId) =>
-    downloadModel(id, (value) => send({ stage: 'download', value, label: 'Скачиваю модель' }))
-  )
-  ipcMain.handle('asr:transcribe', (_e, mediaPath: string, id: ModelId) => {
+  ipcMain.handle('models:download', (_e, id: unknown) => {
+    assertModelId(id)
+    return downloadModel(id, (value) => send({ stage: 'download', value, label: 'Скачиваю модель' }))
+  })
+  ipcMain.handle('asr:transcribe', (_e, mediaPath: string, id: unknown) => {
+    assertModelId(id)
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
     return transcribe(mediaPath, id, send)
   })
 }
 
+const MODEL_IDS: ModelId[] = ['gigaam-v3', 'whisper-small', 'whisper-turbo']
+function assertModelId(id: unknown): asserts id is ModelId {
+  if (!MODEL_IDS.includes(id as ModelId)) throw new Error(`Неизвестная модель: ${String(id)}`)
+}
+
 void app.whenReady().then(() => {
+  // Приложению не нужны камера, микрофон, геопозиция и т.п. — отказываем во всём.
+  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false))
+  session.defaultSession.setPermissionCheckHandler(() => false)
   protocol.handle('media', (req) => {
     const file = decodeURIComponent(new URL(req.url).pathname.slice(1))
     if (!allowedMedia.has(file)) return new Response('forbidden', { status: 403 })

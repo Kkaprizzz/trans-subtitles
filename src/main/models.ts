@@ -23,6 +23,8 @@ interface ModelDef {
   files: ModelFile[]
   /** оценка «тяжело»: нужно хотя бы столько ГБ памяти и столько логических ядер */
   needs: { memGB: number; cores: number }
+  /** пресет выравнивания whisper.cpp (-dtw) для точных таймингов слов */
+  dtw?: string
 }
 
 const HF_WHISPER = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/'
@@ -47,7 +49,8 @@ const MODELS: Record<ModelId, ModelDef> = {
     engine: 'whisper',
     baseUrl: HF_WHISPER,
     files: [{ local: 'model.bin', remote: 'ggml-small-q5_1.bin' }],
-    needs: { memGB: 4, cores: 4 }
+    needs: { memGB: 4, cores: 4 },
+    dtw: 'small'
   },
   'whisper-turbo': {
     title: 'Whisper turbo',
@@ -56,7 +59,8 @@ const MODELS: Record<ModelId, ModelDef> = {
     engine: 'whisper',
     baseUrl: HF_WHISPER,
     files: [{ local: 'model.bin', remote: 'ggml-large-v3-turbo-q5_0.bin' }],
-    needs: { memGB: 8, cores: 6 }
+    needs: { memGB: 8, cores: 6 },
+    dtw: 'large.v3.turbo'
   }
 }
 
@@ -65,6 +69,7 @@ const MARKER = '.complete'
 export const modelDir = (id: ModelId): string => join(app.getPath('userData'), 'models', id)
 
 export const modelEngine = (id: ModelId): 'sherpa' | 'whisper' => MODELS[id].engine
+export const modelDtw = (id: ModelId): string | undefined => MODELS[id].dtw
 
 export function listModels(): ModelStatus[] {
   const memGB = totalmem() / 1024 ** 3
