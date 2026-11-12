@@ -38,8 +38,11 @@ writeFileSync(wordsFile, JSON.stringify(words))
 const failures = []
 function run(name, env) {
   const out = join(dir, `${name}.json`)
+  // ELECTRON_RUN_AS_NODE нужно именно УДАЛИТЬ: даже пустое значение на Windows включает режим Node
+  const childEnv = { ...process.env, TS_SELFTEST: video, TS_SELFTEST_OUT: out, ...env }
+  delete childEnv.ELECTRON_RUN_AS_NODE
   const r = spawnSync(app, [], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '', TS_SELFTEST: video, TS_SELFTEST_OUT: out, ...env },
+    env: childEnv,
     encoding: 'utf8',
     timeout: 15 * 60 * 1000
   })
