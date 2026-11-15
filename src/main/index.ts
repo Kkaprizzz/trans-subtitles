@@ -1,13 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, session, shell } from 'electron'
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { CUSTOM_EXT } from '../shared/fonts'
-import type { ModelId, ProgressEvent, RenderRequest, Word } from '../shared/types'
+import type { MediaInfo, ModelId, ProgressEvent, RenderRequest, Word } from '../shared/types'
 import { transcribe } from './asr'
 import { allowedFonts, allowFontFile } from './fontFiles'
 import { probeMedia } from './media'
+import { buildPreview } from './preview'
 import { downloadModel, listModels } from './models'
 import { loadProject, saveProject } from './projects'
 import { installUpdate, setupUpdater } from './updater'
@@ -109,6 +110,13 @@ function createWindow(): void {
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
 }
 
+/** Открыть файл: прочитать свойства и разрешить отдавать его окну через media://. */
+async function openMedia(path: string): Promise<MediaInfo> {
+  const info = await probeMedia(path)
+  allowedMedia.add(info.path)
+  return info
+}
+
 function registerIpc(): void {
   ipcMain.handle('media:pick', async () => {
     if (!win) return null
@@ -124,17 +132,29 @@ function registerIpc(): void {
       ]
     })
     if (r.canceled || !r.filePaths[0]) return null
-    const info = await probeMedia(r.filePaths[0])
-    allowedMedia.add(info.path)
-    return info
+    return openMedia(r.filePaths[0])
+  })
+
+  // Вызывается только из preload по настоящему перетаскиванию (страница сама сюда не достучится).
+  ipcMain.handle('media:drop', (_e, path: unknown) => {
+    if (typeof path !== 'string' || !path || !existsSync(path)) throw new Error('Перетащенный файл не найден')
+    return openMedia(path)
+  })
+
+  ipcMain.handle('media:preview', async (_e, mediaPath: string) => {
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был открыт в приложении')
+    const info = await probeMedia(mediaPath)
+    const out = await buildPreview(mediaPath, info.duration, (value) =>
+      win?.webContents.send('preview-progress', { mediaPath, value })
+    )
+    allowedMedia.add(out)
+    return out
   })
 
   ipcMain.handle('media:dev-initial', async () => {
     const file = process.env['TS_OPEN']
     if (!file) return null
-    const info = await probeMedia(file)
-    allowedMedia.add(info.path)
-    return info
+    return openMedia(file)
   })
 
   ipcMain.handle('render:start', async (_e, req: RenderRequest) => {

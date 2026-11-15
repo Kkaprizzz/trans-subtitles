@@ -77,6 +77,12 @@ export default function App(): React.JSX.Element {
   const [edit, setEdit] = useState<{ idx: number } | null>(null)
   const [editPos, setEditPos] = useState<{ x: number; y: number } | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  /** что играет окно: сам файл или его копия для превью; null — копия ещё готовится */
+  const [playPath, setPlayPath] = useState<string | null>(null)
+  const [preview, setPreview] = useState<{ value: number; error?: string } | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const mediaPathRef = useRef<string | null>(null)
+  const busyRef = useRef<Busy>(null)
   const [update, setUpdate] = useState<UpdateEvent | null>(null)
   const [shiftMs, setShiftMs] = useState(0)
   const [busy, setBusy] = useState<Busy>(null)
@@ -112,8 +118,30 @@ export default function App(): React.JSX.Element {
   const refreshModels = useCallback(async () => setModels(await window.api.listModels()), [])
 
   /** Новый файл: чистим состояние и поднимаем сохранённые правки, если они есть. */
+  /** Окно не покажет картинку этого файла — делаем H.264-копию (или берём из кэша). */
+  const startPreview = useCallback((info: MediaInfo) => {
+    if (mediaPathRef.current !== info.path) return
+    setPlayPath(null)
+    setPreview({ value: 0 })
+    window.api.preparePreview(info.path).then(
+      (p) => {
+        if (mediaPathRef.current !== info.path) return
+        setPlayPath(p)
+        setPreview(null)
+      },
+      (e: unknown) => {
+        if (mediaPathRef.current !== info.path) return
+        setPreview({ value: 0, error: e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e) })
+      }
+    )
+  }, [])
+
   const afterOpen = useCallback(async (info: MediaInfo) => {
+    mediaPathRef.current = info.path
     setMedia(info)
+    setPreview(null)
+    if (info.needsPreview) startPreview(info)
+    else setPlayPath(info.path)
     dispatch({ type: 'reset', words: [] })
     setSelected(-1)
     setEdit(null)
@@ -126,18 +154,67 @@ export default function App(): React.JSX.Element {
       const when = saved.savedAt ? new Date(saved.savedAt).toLocaleString('ru-RU') : ''
       setNotice(`Восстановлены сохранённые слова${when ? ` (${when})` : ''}. «Распознать» заменит их новым распознаванием`)
     }
-  }, [])
+  }, [startPreview])
 
   useEffect(() => {
     void refreshModels()
     void window.api.devInitialMedia().then((m) => m && void afterOpen(m))
     const offProgress = window.api.onProgress(setProgress)
     const offUpdate = window.api.onUpdate(setUpdate)
+    const offPreview = window.api.onPreviewProgress((e) => {
+      if (e.mediaPath === mediaPathRef.current) setPreview((p) => (p && !p.error ? { value: e.value } : p))
+    })
+    const offDrop = window.api.onMediaDropped((r) => {
+      setDragging(false)
+      if (busyRef.current !== null) {
+        setNotice('Сейчас идёт работа — дождись окончания и перетащи файл ещё раз')
+        return
+      }
+      if (r.error) setError(r.error)
+      else if (r.info) {
+        setError(null)
+        void afterOpen(r.info)
+      }
+    })
     return () => {
       offProgress()
       offUpdate()
+      offPreview()
+      offDrop()
     }
   }, [refreshModels, afterOpen])
+
+  useEffect(() => {
+    busyRef.current = busy
+  }, [busy])
+
+  // Подсказка при перетаскивании файла: считаем вход/выход, потому что dragleave приходит и от дочерних элементов
+  useEffect(() => {
+    let depth = 0
+    const hasFiles = (e: DragEvent): boolean => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files')
+    const enter = (e: DragEvent): void => {
+      if (!hasFiles(e)) return
+      depth++
+      setDragging(true)
+    }
+    const leave = (e: DragEvent): void => {
+      if (!hasFiles(e)) return
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) setDragging(false)
+    }
+    const drop = (): void => {
+      depth = 0
+      setDragging(false)
+    }
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    return () => {
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+    }
+  }, [])
 
   // Автосохранение правок: через 0.6 с после последнего изменения.
   useEffect(() => {
@@ -443,6 +520,11 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="app">
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <span>{busy !== null ? 'Сейчас идёт работа — дождись окончания' : 'Отпусти, чтобы открыть файл'}</span>
+        </div>
+      )}
       <header className="toolbar">
         <button className="btn" onClick={() => void openFile()} disabled={busy !== null}>
           <Icon d={ICON_OPEN} />
@@ -510,7 +592,15 @@ export default function App(): React.JSX.Element {
             {media ? (
               <video
                 ref={videoRef}
-                src={window.api.mediaUrl(media.path)}
+                src={playPath ? window.api.mediaUrl(playPath) : undefined}
+                onLoadedData={() => {
+                  // запасной путь: формат не распознан заранее, но окно всё равно не смогло показать картинку
+                  const v = videoRef.current
+                  if (v && media.hasVideo && v.videoWidth === 0 && playPath === media.path) startPreview(media)
+                }}
+                onError={() => {
+                  if (playPath === media.path && media.hasVideo) startPreview(media)
+                }}
                 onPlay={() => setPlaying(true)}
                 onPause={() => {
                   setPlaying(false)
@@ -532,6 +622,24 @@ export default function App(): React.JSX.Element {
               <p className="stage-empty">Открой видео или аудио, чтобы начать</p>
             )}
             {media && !media.hasVideo && <p className="stage-empty">Только аудио</p>}
+            {media && preview && (
+              <div className="stage-note">
+                {preview.error ? (
+                  <span>{preview.error}</span>
+                ) : (
+                  <>
+                    <span>
+                      Готовлю превью: окно не показывает {media.videoCodec?.toUpperCase() ?? 'этот формат'} — делаю копию для просмотра.
+                      Распознавать можно уже сейчас.
+                    </span>
+                    <span className="mono">{Math.round(preview.value * 100)}%</span>
+                    <span className="note-bar">
+                      <span style={{ transform: `scaleX(${preview.value})` }} />
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
             <div className="caption-frame" ref={frameRef} style={{ width: frameW, height: frameH, background: frameBg }} />
             {edit && editPos && words[edit.idx] && (
               <EditPop

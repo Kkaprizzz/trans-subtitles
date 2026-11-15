@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { MediaInfo } from '../shared/types'
 import { FFMPEG, FFPROBE } from './paths'
+import { needsPreview } from './preview'
 
 function collect(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -20,6 +21,7 @@ function collect(cmd: string, args: string[]): Promise<string> {
 
 interface ProbeStream {
   codec_type?: string
+  codec_name?: string
   width?: number
   height?: number
   r_frame_rate?: string
@@ -34,7 +36,7 @@ export async function probeMedia(file: string): Promise<MediaInfo> {
   } catch {
     throw new Error(`Не удалось прочитать «${basename(file)}»: файл повреждён, не дописан или формат не поддерживается`)
   }
-  const j = JSON.parse(raw) as { format?: { duration?: string }; streams?: ProbeStream[] }
+  const j = JSON.parse(raw) as { format?: { duration?: string; format_name?: string }; streams?: ProbeStream[] }
   const streams = j.streams ?? []
   const video = streams.find((s) => s.codec_type === 'video' && !s.disposition?.attached_pic)
   const hasAudio = streams.some((s) => s.codec_type === 'audio')
@@ -51,6 +53,8 @@ export async function probeMedia(file: string): Promise<MediaInfo> {
     duration: Number(j.format?.duration ?? 0),
     hasVideo: !!video,
     hasAudio,
+    videoCodec: video?.codec_name,
+    needsPreview: !!video && needsPreview(video.codec_name, j.format?.format_name),
     width: video?.width,
     height: video?.height,
     fps

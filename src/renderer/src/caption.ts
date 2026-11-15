@@ -91,21 +91,45 @@ export function createCaptionView(host: HTMLElement): CaptionView {
     setSize()
   }
 
-  /** Если фраза не влезает в заданное число строк или в ширину блока, уменьшаем шрифт. */
+  /** Ширина самого широкого слова вместе с отступами (в подсветке там запас под подскок). */
+  function widestWord(): number {
+    let max = 0
+    for (const el of wordEls) {
+      const cs = getComputedStyle(el)
+      max = Math.max(max, el.offsetWidth + parseFloat(cs.marginLeft) + parseFloat(cs.marginRight))
+    }
+    return max
+  }
+
+  /**
+   * Если фраза не влезает в заданное число строк или слово не влезает по ширине, уменьшаем шрифт.
+   * Слова не переносятся внутри себя, поэтому длинное слово иначе вылезло бы за край кадра.
+   */
   function fitText(): void {
+    const MIN_FIT = 0.25
+    // небольшой запас: обводка рисуется наружу от букв
+    const SAFE = 0.97
     fit = 1
     setSize()
     const saved = block.style.transform
     block.style.transform = 'translate(-50%, -50%)'
-    for (let i = 0; i < 14; i++) {
+    const cs = getComputedStyle(plate)
+    const avail = (block.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) * SAFE
+
+    // ширина слова пропорциональна размеру шрифта — сразу подгоняем точно
+    const w = widestWord()
+    if (avail > 0 && w > avail) {
+      fit = Math.max(MIN_FIT, fit * (avail / w))
+      setSize()
+    }
+    for (let i = 0; i < 20; i++) {
       const fs = parseFloat(getComputedStyle(block).fontSize)
-      const cs = getComputedStyle(plate)
       const padV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
       const rect = plate.getBoundingClientRect()
       const lines = Math.round((rect.height - padV) / (fs * 1.12))
-      const tooWide = rect.width > block.clientWidth + 1
-      if ((lines <= style.maxLines && !tooWide) || fit <= 0.4) break
-      fit -= 0.05
+      const tooWide = widestWord() > avail + 0.5
+      if ((lines <= style.maxLines && !tooWide) || fit <= MIN_FIT) break
+      fit = Math.max(MIN_FIT, fit - 0.05)
       setSize()
     }
     block.style.transform = saved

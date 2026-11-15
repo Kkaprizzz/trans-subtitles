@@ -15,6 +15,10 @@ export interface MediaInfo {
   duration: number
   hasVideo: boolean
   hasAudio: boolean
+  /** кодек видео по ffprobe (h264, hevc, prores…) */
+  videoCodec?: string
+  /** окно не покажет картинку этого файла — нужна копия для превью */
+  needsPreview: boolean
   width?: number
   height?: number
   fps?: number
@@ -98,6 +102,11 @@ export interface Api {
   pickFont(): Promise<{ path: string; name: string } | null>
   /** Разрешить показ ранее выбранного шрифта после перезапуска; false — файла больше нет */
   allowFont(path: string): Promise<boolean>
+  /** Сделать (или взять из кэша) копию видео для превью; возвращает путь к копии */
+  preparePreview(mediaPath: string): Promise<string>
+  onPreviewProgress(cb: (e: { mediaPath: string; value: number }) => void): () => void
+  /** Файл, перетащенный в окно (только настоящее перетаскивание мышью) */
+  onMediaDropped(cb: (r: { info?: MediaInfo; error?: string }) => void): () => void
   /** Сохранённые правки слов для этого файла (или null) */
   loadProject(mediaPath: string): Promise<SavedProject | null>
   saveProject(mediaPath: string, words: Word[]): Promise<void>
