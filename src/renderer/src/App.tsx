@@ -13,6 +13,7 @@ import {
 import type { MediaInfo, ModelId, ModelStatus, ProgressEvent, UpdateEvent, Word } from '../../shared/types'
 import { createCaptionView, setupStage, type CaptionView } from './caption'
 import { loadCustomFont } from './customFont'
+import { hideSplash, splashStep } from './splash'
 import EditPop from './EditPop'
 import { fmtTime, plural } from './format'
 import RenderPanel from './RenderPanel'
@@ -157,8 +158,14 @@ export default function App(): React.JSX.Element {
   }, [startPreview])
 
   useEffect(() => {
-    void refreshModels()
-    void window.api.devInitialMedia().then((m) => m && void afterOpen(m))
+    splashStep('Проверяю модели', 0.45)
+    const models = refreshModels()
+    const initial = window.api.devInitialMedia().then(async (m) => {
+      if (!m) return
+      splashStep('Открываю файл', 0.75)
+      await afterOpen(m)
+    })
+    void Promise.allSettled([models, initial]).then(() => hideSplash())
     const offProgress = window.api.onProgress(setProgress)
     const offUpdate = window.api.onUpdate(setUpdate)
     const offPreview = window.api.onPreviewProgress((e) => {

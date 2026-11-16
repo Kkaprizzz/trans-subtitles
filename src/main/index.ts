@@ -87,7 +87,9 @@ function createWindow(): void {
     height: 840,
     minWidth: 1000,
     minHeight: 640,
-    backgroundColor: '#D9D6CF',
+    backgroundColor: '#111111',
+    // показываем после первой отрисовки: сразу с заставкой, без пустого окна
+    show: false,
     title: 'Trans Subtitles',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -97,6 +99,7 @@ function createWindow(): void {
     }
   })
   win.setMenuBarVisibility(false)
+  win.once('ready-to-show', () => win?.show())
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }

@@ -8,8 +8,18 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trans Subtitles</title>
+    <!-- Заставка рисуется ещё до загрузки интерфейса: только HTML и CSS -->
+    <link rel="stylesheet" href="/src/splash.css" />
   </head>
   <body>
+    <div id="splash" role="status" aria-live="polite">
+      <div class="splash-cap" aria-label="Trans Subtitles"><span>Trans</span> <span>Subtitles</span></div>
+      <div class="splash-foot">
+        <span id="splash-status">Загружаю интерфейс</span>
+        <span>v%VITE_APP_VERSION%</span>
+      </div>
+      <div class="splash-bar"><span id="splash-bar"></span></div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

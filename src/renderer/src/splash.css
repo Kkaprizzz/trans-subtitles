@@ -1,0 +1,102 @@
+/* Заставка при запуске. Отдельный файл: подключается в <head> и рисуется до загрузки скриптов. */
+
+/* Только латиница — для надписи «Trans Subtitles»; block, чтобы не мелькнул запасной шрифт */
+@font-face {
+  font-family: 'TS Splash';
+  src: url('../../../node_modules/@fontsource-variable/montserrat/files/montserrat-latin-wght-normal.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: block;
+}
+
+html,
+body {
+  margin: 0;
+  background: #111111;
+}
+
+#splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  overflow: hidden;
+  background: #111111;
+  color: #8a877e;
+  font: 400 12px/1.4 'IBM Plex Mono', ui-monospace, monospace;
+  transition: opacity 200ms cubic-bezier(0.22, 0.8, 0.2, 1);
+}
+#splash.done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Надпись стоит там же, где в приложении стоят субтитры (63.5% высоты), и выглядит так же */
+.splash-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 63.5%;
+  transform: translateY(-50%);
+  text-align: center;
+  font: 800 clamp(40px, 8.9vmin, 120px) / 1.1 'TS Splash', sans-serif;
+  color: #ffe500;
+  -webkit-text-stroke: 0.2em #000000;
+  paint-order: stroke fill;
+}
+.splash-cap span {
+  display: inline-block;
+  opacity: 0;
+  animation: splash-pop 140ms cubic-bezier(0.22, 0.8, 0.2, 1) forwards;
+}
+.splash-cap span:nth-child(1) {
+  animation-delay: 120ms;
+}
+.splash-cap span:nth-child(2) {
+  animation-delay: 480ms;
+}
+@keyframes splash-pop {
+  from {
+    opacity: 0;
+    transform: translateY(0.08em) scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.splash-foot {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 18px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.splash-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: #222222;
+}
+.splash-bar > span {
+  display: block;
+  height: 100%;
+  background: #c2410c;
+  transform-origin: left;
+  transform: scaleX(0.15);
+  transition: transform 200ms cubic-bezier(0.22, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-cap span {
+    animation: none;
+    opacity: 1;
+  }
+  #splash,
+  .splash-bar > span {
+    transition: none;
+  }
+}

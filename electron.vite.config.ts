@@ -1,6 +1,10 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+
+// версия в заставке (index.html: %VITE_APP_VERSION%)
+process.env['VITE_APP_VERSION'] = (JSON.parse(readFileSync('package.json', 'utf8')) as { version: string }).version
 
 export default defineConfig({
   main: {
