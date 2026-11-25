@@ -475,16 +475,29 @@ function registerIpc(): void {
     const a = Number(start)
     const b = Number(end)
     if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b <= a) throw new Error('Неверный отрезок для распознавания')
-    return transcribeRange(mediaPath, id, send, { start: a, end: b }, typeof label === 'string' ? label.slice(0, 80) : 'Распознаю речь')
+    const ac = new AbortController()
+    asrAborts.add(ac)
+    try {
+      return await transcribeRange(mediaPath, id, send, { start: a, end: b }, typeof label === 'string' ? label.slice(0, 80) : 'Распознаю речь', ac.signal)
+    } finally {
+      asrAborts.delete(ac)
+    }
+  })
+  ipcMain.handle('asr:cancel', () => {
+    for (const ac of asrAborts) ac.abort()
   })
   ipcMain.handle('asr:transcribe', (_e, mediaPath: string, id: unknown) => {
     assertModelId(id)
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
-    return transcribe(mediaPath, id, send)
+    const ac = new AbortController()
+    asrAborts.add(ac)
+    return transcribe(mediaPath, id, send, ac.signal).finally(() => asrAborts.delete(ac))
   })
 }
 
 let analyzeAbort: AbortController | null = null
+/** Идущие распознавания речи: отмена прерывает их все (процесс распознавания и нарезку звука). */
+const asrAborts = new Set<AbortController>()
 
 /** Папка, которой ещё нет: «Имя», «Имя (2)», «Имя (3)»… — чтобы не перезаписать прошлый рендер. */
 function freeDir(base: string): string {

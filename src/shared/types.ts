@@ -276,6 +276,8 @@ export interface Api {
   /** Короткий запрос к ИИ: проверить ключ и модель. Возвращает подпись для пользователя */
   testAi(): Promise<string>
   analyzeClips(req: AnalyzeRequest): Promise<AnalyzeResponse>
+  /** прервать идущее распознавание речи (если его нет — ничего не делает) */
+  cancelAsr(): Promise<void>
   cancelAnalyze(): Promise<void>
   /** экспорт папки клипов 9:16; null — пользователь закрыл диалог выбора папки */
   exportClips(p: Project, req: ClipsExportRequest): Promise<ClipsExportResult | null>

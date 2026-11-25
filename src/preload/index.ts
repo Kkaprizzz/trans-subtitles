@@ -78,6 +78,7 @@ const api: Api = {
   setAi: (patch) => ipcRenderer.invoke('ai:set', patch),
   testAi: () => ipcRenderer.invoke('ai:test'),
   analyzeClips: (req) => ipcRenderer.invoke('clips:analyze', req),
+  cancelAsr: () => ipcRenderer.invoke('asr:cancel'),
   cancelAnalyze: () => ipcRenderer.invoke('clips:cancel'),
   exportClips: (p, req) => ipcRenderer.invoke('export:clips', p, req),
   render: (req) => ipcRenderer.invoke('render:start', req),

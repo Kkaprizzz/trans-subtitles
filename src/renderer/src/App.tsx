@@ -213,6 +213,11 @@ export default function App(): React.JSX.Element {
         <span className="app-title">{inEditor ? ed.name : 'Trans Subtitles'}</span>
         <span className="spacer" />
         {inEditor && ed.status && <span className={`app-status${ed.statusErr ? ' warn' : ' dim'}`}>{ed.status}</span>}
+        {inEditor && ed.cancellable && (
+          <button className="btn icon small ghost" onClick={() => c()?.cancelWork()} title="Отменить: проект останется как был" aria-label="Отменить">
+            ×
+          </button>
+        )}
         {inEditor && (
           <button className="btn primary" onClick={() => c()?.exportVideo()} disabled={!ed.hasItems} title="Экспорт видео (Ctrl+E)">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">

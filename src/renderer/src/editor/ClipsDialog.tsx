@@ -149,8 +149,8 @@ export default function ClipsDialog(p: Props): React.JSX.Element {
         </div>
         <div className="modal-actions">
           {p.busy ? (
-            <button className="btn" onClick={p.onCancel} disabled={stage === 'asr' || stage === 'audio'} title={stage === 'asr' || stage === 'audio' ? 'Распознавание речи нельзя прервать — дождись конца, дальше можно отменить поиск' : undefined}>
-              Отменить поиск
+            <button className="btn" onClick={p.onCancel}>
+              Отменить
             </button>
           ) : (
             <button className="btn primary" onClick={run} disabled={noKey || (recognized && words.length === 0)}>

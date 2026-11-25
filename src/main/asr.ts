@@ -9,8 +9,8 @@ import { transcribeWithWhisper } from './whisper'
 
 type Emit = (e: ProgressEvent) => void
 
-export async function transcribe(mediaPath: string, id: ModelId, emit: Emit): Promise<Word[]> {
-  return transcribeRange(mediaPath, id, emit)
+export async function transcribe(mediaPath: string, id: ModelId, emit: Emit, signal?: AbortSignal): Promise<Word[]> {
+  return transcribeRange(mediaPath, id, emit, undefined, 'Распознаю речь', signal)
 }
 
 /**
@@ -22,8 +22,10 @@ export async function transcribeRange(
   id: ModelId,
   emit: Emit,
   range?: { start: number; end: number },
-  label = 'Распознаю речь'
+  label = 'Распознаю речь',
+  signal?: AbortSignal
 ): Promise<Word[]> {
+  if (signal?.aborted) throw new Error('Отменено')
   const info = await probeMedia(mediaPath)
   if (!info.hasAudio) throw new Error('В файле нет звуковой дорожки — распознавать нечего')
   const wav = join(app.getPath('temp'), `trans-subtitles-${Date.now()}-${Math.floor(Math.random() * 1e6)}.wav`)
@@ -38,7 +40,8 @@ export async function transcribeRange(
       wav,
       length,
       (v) => emit({ stage: 'audio', value: v, label: `${label}: извлекаю звук` }),
-      range ? { start, length } : undefined
+      range ? { start, length } : undefined,
+      signal
     )
 
     emit({ stage: 'asr', value: 0, label })
@@ -47,7 +50,8 @@ export async function transcribeRange(
     if (modelEngine(id) === 'whisper') {
       return shift(
         await transcribeWithWhisper(wav, join(modelDir(id), 'model.bin'), threads, modelDtw(id), (v) =>
-          emit({ stage: 'asr', value: v, label })
+          emit({ stage: 'asr', value: v, label }),
+          signal
         )
       )
     }
@@ -60,9 +64,12 @@ export async function transcribeRange(
       const finish = (fn: () => void): void => {
         if (settled) return
         settled = true
+        signal?.removeEventListener('abort', onAbort)
         child.kill()
         fn()
       }
+      const onAbort = (): void => finish(() => reject(new Error('Отменено')))
+      signal?.addEventListener('abort', onAbort, { once: true })
 
       child.on('message', (m: { type: string; value?: number; words?: Word[]; message?: string }) => {
         if (m.type === 'progress') emit({ stage: 'asr', value: m.value ?? 0, label })

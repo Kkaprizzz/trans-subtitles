@@ -66,6 +66,8 @@ export interface EditorCommands {
   delRipple(): void
   /** соединить выделенные куски обратно (Ctrl+J) */
   join(): void
+  /** прервать идущее распознавание или поиск моментов */
+  cancelWork(): void
   /** поставить метку на курсоре */
   addMarker(): void
   selectAll(): void
@@ -87,6 +89,8 @@ export interface EditorState {
   duration: number
   status: string | null
   statusErr: boolean
+  /** идёт работа, которую можно прервать (распознавание, поиск моментов) */
+  cancellable: boolean
 }
 
 interface Props {
@@ -194,6 +198,8 @@ export default function Editor(p: Props): React.JSX.Element {
   const [clipsOpen, setClipsOpen] = useState(false)
   const [clipsBusy, setClipsBusy] = useState(false)
   const [clipsError, setClipsError] = useState<string | null>(null)
+  // отмена нажата: следующие шаги цепочки (распознавание → ИИ) не начинаются
+  const cancelledRef = useRef(false)
   const [fontTick, setFontTick] = useState(0)
   const stopAtRef = useRef<number | null>(null)
   const mounted = useRef(true)
@@ -634,6 +640,7 @@ export default function Editor(p: Props): React.JSX.Element {
     const modelId = loadModelId()
     const results: Recognized[] = []
     for (let k = 0; k < jobs.length; k++) {
+      if (cancelledRef.current) throw new Error('Отменено')
       const j = jobs[k]
       const m = mediaOf(pr, j.mediaId)
       if (!m) continue
@@ -655,12 +662,14 @@ export default function Editor(p: Props): React.JSX.Element {
     }
     if (!(await ensureModel())) return
     const jobs = neededRanges(pr, targets)
+    cancelledRef.current = false
     setAsrBusy(true)
     setProgress(null)
     p.onError(null)
     try {
       const results = await recognize(pr, jobs, 'Субтитры')
       if (!mounted.current) return
+      if (cancelledRef.current) throw new Error('Отменено')
       let next = applyAll(projectRef.current, results)
       next = addSubtitles(next, targets.map((i) => i.id))
       commit(next)
@@ -672,7 +681,11 @@ export default function Editor(p: Props): React.JSX.Element {
       setWordSel(-1)
       flash(jobs.length === 0 ? 'Слова уже были распознаны — субтитры включены' : `Субтитры готовы: ${results.reduce((n, r) => n + r.words.length, 0)} слов`)
     } catch (e) {
-      if (mounted.current) p.onError(clean(e))
+      // отмена — не ошибка: проект остался как был
+      if (mounted.current) {
+        if (clean(e) === 'Отменено') flash('Отменено')
+        else p.onError(clean(e))
+      }
     } finally {
       if (mounted.current) {
         setAsrBusy(false)
@@ -687,6 +700,12 @@ export default function Editor(p: Props): React.JSX.Element {
     const t = subsTargets(project, selected).filter((i) => mediaOf(project, i.mediaId)?.hasVideo)
     return t[0] ?? null
   }, [project, selected])
+  /** Отмена распознавания и поиска моментов: процессы прерываются, проект остаётся как был. */
+  const cancelWork = (): void => {
+    cancelledRef.current = true
+    void window.api.cancelAsr()
+    void window.api.cancelAnalyze()
+  }
   const openClips = (): void => {
     if (!clipsTarget) {
       p.onError('Положи на таймлайн видео со звуком и нажми «Нарезка»')
@@ -700,6 +719,7 @@ export default function Editor(p: Props): React.JSX.Element {
     const target = clipsTarget
     if (!target || clipsBusy) return
     setClipsError(null)
+    cancelledRef.current = false
     setClipsBusy(true)
     setProgress(null)
     try {
@@ -707,6 +727,7 @@ export default function Editor(p: Props): React.JSX.Element {
       const pr = projectRef.current
       const jobs = neededRanges(pr, [target])
       const results = await recognize(pr, jobs, 'Распознаю речь для нарезки')
+      if (cancelledRef.current) throw new Error('Отменено')
       const withWords = applyAll(projectRef.current, results)
       const media = mediaOf(withWords, target.mediaId)
       const words = (withWords.words[target.mediaId] ?? []).filter((w) => w.start >= target.in && w.end <= target.out)
@@ -731,7 +752,10 @@ export default function Editor(p: Props): React.JSX.Element {
       flash(`Найдено рамок: ${added.length}${res.warnings.length ? ' (часть ответов ИИ не разобрана)' : ''}`)
     } catch (e) {
       const msg = clean(e)
-      if (mounted.current && msg !== 'Отменено') setClipsError(msg)
+      if (mounted.current) {
+        if (msg === 'Отменено') flash('Отменено')
+        else setClipsError(msg)
+      }
     } finally {
       if (mounted.current) {
         setClipsBusy(false)
@@ -922,6 +946,7 @@ export default function Editor(p: Props): React.JSX.Element {
     del: () => del(false),
     delRipple: () => del(true),
     join: joinSel,
+    cancelWork,
     addMarker: addMarkerHere,
     selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
     deselect: () => setSelected([]),
@@ -933,9 +958,9 @@ export default function Editor(p: Props): React.JSX.Element {
   }
   p.commands.current = cmds
 
-  const asrLabel = asrBusy ? `${progress?.label ?? 'Субтитры: готовлю'}${progress?.stage === 'asr' ? ` — ${Math.round(progress.value * 100)}%` : ''}` : null
+  const asrLabel = asrBusy || clipsBusy ? `${progress?.label ?? (clipsBusy ? 'Нарезка: готовлю' : 'Субтитры: готовлю')}${progress?.stage === 'asr' ? ` — ${Math.round(progress.value * 100)}%` : ''}` : null
   const status = saveError ? `Не сохранено: ${saveError}` : asrLabel ?? (exporting && progress ? progress.label : savedNote)
-  const stateKey = [project.name, hist.past.length > 0, hist.future.length > 0, selected.length > 0, project.items.length > 0, duration, status, !!saveError].join('|')
+  const stateKey = [asrBusy, clipsBusy, project.name, hist.past.length > 0, hist.future.length > 0, selected.length > 0, project.items.length > 0, duration, status, !!saveError].join('|')
   // eslint-disable-next-line react-hooks/rules-of-hooks
   useEffect(() => {
     p.onState({
@@ -946,7 +971,8 @@ export default function Editor(p: Props): React.JSX.Element {
       hasItems: project.items.length > 0,
       duration,
       status,
-      statusErr: !!saveError
+      statusErr: !!saveError,
+      cancellable: asrBusy || clipsBusy
     })
   }, [stateKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1068,11 +1094,11 @@ export default function Editor(p: Props): React.JSX.Element {
           <span className="tl-sep" />
           <button
             className="btn"
-            onClick={() => void subtitles()}
-            disabled={asrBusy || project.items.length === 0}
+            onClick={() => (asrBusy ? cancelWork() : void subtitles())}
+            disabled={clipsBusy || (!asrBusy && project.items.length === 0)}
             title="Распознать речь выделенного видео (без выделения — видео на самой нижней дорожке) и положить субтитры отдельным куском"
           >
-            {asrBusy ? 'Распознаю…' : 'Субтитры'}
+            {asrBusy ? 'Отменить' : 'Субтитры'}
           </button>
           <button className="btn" onClick={openClips} disabled={project.items.length === 0 || clipsBusy} title="ИИ найдёт цельные моменты в выделенном видео (без выделения — в видео на самой нижней дорожке) и поставит рамки на строку «Клипы»">
             Нарезка
@@ -1128,7 +1154,7 @@ export default function Editor(p: Props): React.JSX.Element {
           progress={progress}
           error={clipsError}
           onRun={(o) => void runClips(o)}
-          onCancel={() => void window.api.cancelAnalyze()}
+          onCancel={cancelWork}
           onClose={() => setClipsOpen(false)}
           onOpenSettings={() => p.onOpenSettings('ai')}
           settingsOpen={p.blocked}

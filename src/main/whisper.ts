@@ -36,7 +36,8 @@ export function transcribeWithWhisper(
   modelFile: string,
   threads: number,
   dtw: string | undefined,
-  onProgress: (v: number) => void
+  onProgress: (v: number) => void,
+  signal?: AbortSignal
 ): Promise<Word[]> {
   const bin = whisperBinary()
   const outBase = join(tmpdir(), `trans-subtitles-whisper-${Date.now()}`)
@@ -66,6 +67,11 @@ export function transcribeWithWhisper(
       }
     )
     let err = ''
+    const onAbort = (): void => {
+      child.kill('SIGKILL')
+    }
+    if (signal?.aborted) onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     child.stderr.on('data', (d: Buffer) => {
       const text = d.toString()
       err = (err + text).slice(-4000)
@@ -74,7 +80,9 @@ export function transcribeWithWhisper(
     })
     child.on('error', (e) => reject(new Error(`Не удалось запустить whisper-cli: ${e.message}`)))
     child.on('close', async (code) => {
+      signal?.removeEventListener('abort', onAbort)
       try {
+        if (signal?.aborted) throw new Error('Отменено')
         // Сборка рассчитана на процессоры с AVX2; на более старых whisper-cli падает по «недопустимой инструкции».
         if (code === null || code === 3221225501 || code === 132) {
           throw new Error('whisper-cli аварийно завершился (вероятно, процессор без AVX2). Для такого ПК выбери модель GigaAM v3')

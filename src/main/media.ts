@@ -71,9 +71,11 @@ export function extractAudio(
   duration: number,
   onProgress: (v: number) => void,
   /** только отрезок файла: секунды начала и длина */
-  range?: { start: number; length: number }
+  range?: { start: number; length: number },
+  signal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('Отменено'))
     const p = spawn(
       FFMPEG,
       [
@@ -87,6 +89,10 @@ export function extractAudio(
       { stdio: ['ignore', 'pipe', 'pipe'] }
     )
     let err = ''
+    const onAbort = (): void => {
+      p.kill('SIGKILL')
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
     p.stderr.on('data', (d) => (err += d))
     p.stdout.on('data', (d: Buffer) => {
       // out_time_ms на самом деле в микросекундах
@@ -94,8 +100,10 @@ export function extractAudio(
       if (m && duration > 0) onProgress(Math.min(1, Number(m[1]) / 1e6 / duration))
     })
     p.on('error', reject)
-    p.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(err.trim().split('\n').pop() || `ffmpeg код ${code}`))
-    )
+    p.on('close', (code) => {
+      signal?.removeEventListener('abort', onAbort)
+      if (signal?.aborted) reject(new Error('Отменено'))
+      else code === 0 ? resolve() : reject(new Error(err.trim().split('\n').pop() || `ffmpeg код ${code}`))
+    })
   })
 }
