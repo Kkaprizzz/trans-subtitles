@@ -5,14 +5,13 @@ import { basename, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { CUSTOM_EXT } from '../shared/fonts'
 import { analyzeClips, windowCharsForTpm } from '../shared/clipsAnalyze'
-import { slug, type CutClip } from '../shared/cut'
-import type { AiSettingsPatch, AnalyzeRequest, CutRenderRequest, ExportRequest, MediaInfo, ModelId, ProgressEvent, RenderRequest, Word } from '../shared/types'
+import { slug } from '../shared/cut'
+import type { AiSettingsPatch, AnalyzeRequest, ClipsExportRequest, ExportRequest, MediaInfo, ModelId, ProgressEvent, RenderRequest } from '../shared/types'
 import { getAiSettings, resolveAi, setAiSettings } from './aiConfig'
-import { renderClips } from './cutRender'
 import { chat } from './llm'
 import { getPeaks } from './peaks'
 import { deleteProject, duplicateProject, exportProjectFile, importProjectFile, listProjects, readProject, writeProject } from './projectStore'
-import { exportTimeline } from './exportTimeline'
+import { exportClips, exportTimeline } from './exportTimeline'
 import { thumbnail } from './thumbs'
 import { newProject, sanitizeProject, type Project } from '../shared/project'
 import { readFile as readFileAsync } from 'node:fs/promises'
@@ -21,7 +20,6 @@ import { allowedFonts, allowFontFile } from './fontFiles'
 import { probeMedia } from './media'
 import { buildPreview } from './preview'
 import { downloadModel, listModels } from './models'
-import { loadProject, saveProject } from './projects'
 import { checkNow, installUpdate, setupUpdater } from './updater'
 import { cacheInfo, clearCache, getAppSettings, setAppSettings } from './appSettings'
 import { disposeRenderWindow, renderOverlay, type CancelToken } from './render'
@@ -216,15 +214,6 @@ function registerIpc(): void {
   ipcMain.handle('update:install', () => installUpdate())
   ipcMain.handle('app:reveal', (_e, path: string) => shell.showItemInFolder(path))
 
-  ipcMain.handle('project:load', (_e, mediaPath: string) => {
-    if (!allowedMedia.has(mediaPath)) return null
-    return loadProject(mediaPath)
-  })
-  ipcMain.handle('project:save', (_e, mediaPath: string, words: Word[], clips: CutClip[]) => {
-    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
-    return saveProject(mediaPath, words, Array.isArray(clips) ? clips : [])
-  })
-
   // --- проекты монтажки ---
   /** Файлы проекта разрешаем отдавать окну только после проверки ffprobe: это настоящие медиафайлы. */
   const allowProjectMedia = async (p: Project): Promise<string[]> => {
@@ -242,6 +231,7 @@ function registerIpc(): void {
     }
     return missing
   }
+
   ipcMain.handle('projects:list', () => listProjects())
   ipcMain.handle('projects:create', async (_e, name: unknown) => {
     const st = await getAppSettings()
@@ -421,43 +411,47 @@ function registerIpc(): void {
       const res = await analyzeClips(
         req.words,
         (m) => chat(ai.cfg, m, { signal, maxTokens, extra: ai.extra, retries: 6 }),
-        { windows, minDur, maxDur, maxClips: count, mediaDuration: Number(req.mediaDuration) || undefined },
-        (p) => send({ stage: 'ai', value: p.done / p.total, label: `ИИ ищет моменты: часть ${p.done} из ${p.total}` }),
+        { windows, minDur, maxDur, maxClips: count, mediaDuration: Number(req.mediaDuration) || undefined, coldViewer: true },
+        (p) =>
+          send({
+            stage: 'ai',
+            value: p.stage === 'check' ? 1 : p.done / p.total,
+            label: p.stage === 'check' ? 'ИИ проверяет, понятны ли клипы без контекста' : `ИИ ищет моменты: часть ${p.done} из ${p.total}`
+          }),
         () => signal.aborted
       )
-      return { clips: res.clips, warnings: res.warnings, proposed: res.proposed, usage: res.usage, seconds: (Date.now() - started) / 1000 }
+      return { clips: res.clips, warnings: res.warnings, proposed: res.proposed, notes: res.notes, usage: res.usage, seconds: (Date.now() - started) / 1000 }
     } finally {
       analyzeAbort = null
     }
   })
   ipcMain.handle('clips:cancel', () => analyzeAbort?.abort())
-  ipcMain.handle('cut:render', async (_e, req: CutRenderRequest) => {
+  ipcMain.handle('export:clips', async (_e, p: Project, req: ClipsExportRequest) => {
     if (!win) return null
-    if (renderCancel) throw new Error('Рендер уже идёт')
-    if (!req?.sourcePath || !allowedMedia.has(req.sourcePath)) throw new Error('Исходник можно брать только из файла, выбранного через диалог')
-    if (req.style.font === 'custom' && req.style.customFontPath && !allowFontFile(req.style.customFontPath)) {
-      throw new Error('Файл своего шрифта не найден или не поддерживается. Выбери шрифт заново на вкладке «Стиль»')
-    }
+    if (renderCancel) throw new Error('Экспорт уже идёт')
+    const clean = sanitizeProject(p)
+    if (!clean) throw new Error('Некорректный проект')
+    for (const m of clean.media) if (!allowedMedia.has(m.path)) throw new Error(`Файл не был добавлен через приложение: ${m.name}`)
+    const ids = Array.isArray(req?.clipIds) ? req.clipIds.filter((x): x is string => typeof x === 'string') : []
     // TS_RENDER_OUT — только для автотестов окна: папка без диалога
     let parent = process.env['TS_RENDER_OUT']
     if (!parent) {
       const r = await dialog.showOpenDialog(win, {
         title: 'Куда положить клипы',
-        defaultPath: app.getPath('videos'),
+        defaultPath: (await getAppSettings()).exportDir ?? app.getPath('videos'),
         properties: ['openDirectory', 'createDirectory']
       })
       if (r.canceled || !r.filePaths[0]) return null
       parent = r.filePaths[0]
     }
-    const dir = freeDir(join(parent, `${slug(req.sourceName) || 'Видео'} — клипы`))
+    const dir = freeDir(join(parent, `${slug(clean.name) || 'Проект'} — клипы`))
     renderCancel = { cancelled: false }
     try {
-      return await renderClips(req, dir, send, renderCancel)
+      return await exportClips(clean, { clipIds: ids, quality: req.quality, burnSubtitles: req.burnSubtitles !== false, writeText: req.writeText !== false }, dir, send, renderCancel)
     } finally {
       renderCancel = null
     }
   })
-
   ipcMain.handle('font:pick', async () => {
     if (!win) return null
     const r = await dialog.showOpenDialog(win, {

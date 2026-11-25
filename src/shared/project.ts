@@ -1,5 +1,5 @@
 /**
- * Модель проекта монтажки (формат v4). Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
+ * Модель проекта монтажки (формат v6). Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
  *
  * Дорожки — массив сверху вниз: сначала видеодорожки (выше дорожка — выше слой в кадре), потом звуковые.
  * Все видеодорожки одинаковые: нет «основной» и нет авто-сдвига кусков. Кусок (Item) — отрезок in..out файла
@@ -7,8 +7,10 @@
  * слова лежат у файла (во времени исходника), кусок показывает отрезок in..out. Кусок субтитров может быть
  * связан с видеокуском (link): тогда он повторяет его границы и едет, режется и удаляется вместе с ним.
  * Метки — флажки на дорожке для удобства, на результат не влияют.
+ * Клипы «Нарезки» — рамки на отдельной строке сверху: привязаны к файлу и времени исходника (не к таймлайну),
+ * поэтому едут за видео; где они стоят на таймлайне, считает cut.ts.
  */
-import type { CutClip } from './cut.ts'
+import { cleanPoints, splitGain, type GainPoint } from './audio.ts'
 import * as E from './edit.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -56,10 +58,41 @@ export interface Item {
   /** отрезок исходника, секунды */
   in: number
   out: number
-  /** громкость звука куска, 1 — как в файле */
+  /** Звук куска прикреплён к нему и звучит вместе с ним. Отделили — у видеокуска false, а звук лежит отдельным куском на звуковой дорожке. */
+  audio: boolean
+  /** громкость куска без точек, 0..1 (1 — как в файле); с точками линия громкости главнее */
   volume: number
+  /** линия громкости: точки во времени ИСХОДНИКА, между ними линейно */
+  gain: GainPoint[]
   /** для kind 'subs': id видеокуска, за которым едут субтитры; null — живут сами */
   link: string | null
+}
+
+/** crop — кадр обрезается до вертикали; fit-blur — видео целиком поверх размытой копии самого себя */
+export type Framing = 'crop' | 'fit-blur'
+
+/** Рамка клипа «Нарезки»: отрезок файла (секунды исходника) + тексты и способ кадрирования в 9:16. */
+export interface Clip {
+  id: string
+  mediaId: string
+  start: number
+  end: number
+  title: string
+  description: string
+  hashtags: string[]
+  /** почему ИИ выбрал этот момент */
+  reason: string
+  /** оценка ИИ; null — рамку поставили вручную */
+  score: number | null
+  /** границы ИИ приблизительные (цитата не нашлась) */
+  approx: boolean
+  /** подсказка «холодного зрителя»: что может быть непонятно без контекста; пусто — всё в порядке */
+  note: string
+  framing: Framing
+  /** куда сдвинут кадр при обрезке: 0 — левый край исходника, 0.5 — центр, 1 — правый */
+  offsetX: number
+  /** попадает ли клип в экспорт папкой */
+  enabled: boolean
 }
 
 export const MARKER_COLORS = 6
@@ -82,7 +115,7 @@ export interface Canvas {
 }
 
 export interface Project {
-  version: 4
+  version: 6
   id: string
   name: string
   createdAt: string
@@ -98,13 +131,15 @@ export interface Project {
   words: Record<string, Word[]>
   /** какие отрезки файла уже распознаны (секунды исходника) — чтобы не распознавать дважды */
   covered: Record<string, Range[]>
-  /** рамки «Нарезки», секунды таймлайна */
-  clips: CutClip[]
+  /** рамки «Нарезки», время исходника */
+  clips: Clip[]
   style: SubtitleStyle | null
 }
 
 /** Короче этого кусок не сделать: его не схватить мышью. */
 export const MIN_ITEM = 0.1
+/** Короче этого рамку клипа не сделать: иначе её не схватить мышью и не посмотреть. */
+export const MIN_CLIP = 1
 /** «Новая дорожка»: при вставке/переносе туда заводится свежая дорожка нужного вида. */
 export const NEW_TRACK = '__new__'
 
@@ -121,7 +156,7 @@ const newTrack = (kind: TrackKind): Track => ({ id: uid('t'), kind, muted: false
 
 export function newProject(name: string, now = new Date().toISOString()): Project {
   return {
-    version: 4,
+    version: 6,
     id: uid('p'),
     name,
     createdAt: now,
@@ -147,9 +182,15 @@ export const itemsOn = (p: Project, trackId: string): Item[] =>
 export const videoTracks = (p: Project): Track[] => p.tracks.filter((t) => t.kind === 'video')
 export const audioTracks = (p: Project): Track[] => p.tracks.filter((t) => t.kind === 'audio')
 
-/** На какую дорожку годится кусок: картинка (видео и субтитры) — на видеодорожку, чистый звук — на звуковую. */
+/**
+ * На какие дорожки годится кусок: картинка (видео и субтитры) — на видеодорожки, чистый звук — на звуковые.
+ * Кусок, уже лежащий на дорожке, остаётся на дорожках её вида: звук, отделённый от видео, — звуковой кусок,
+ * хотя файл видео. Новый (ещё без дорожки) — по файлу.
+ */
 export function itemTrackKind(p: Project, it: Item): TrackKind {
   if (it.kind === 'subs') return 'video'
+  const own = p.tracks.find((t) => t.id === it.trackId)
+  if (own) return own.kind
   return mediaOf(p, it.mediaId)?.hasVideo ? 'video' : 'audio'
 }
 
@@ -204,7 +245,7 @@ export function setTrack(p: Project, id: string, patch: Partial<Pick<Track, 'mut
  * Ищем место для куска: сначала желаемая дорожка, затем ближайшие выше (в пределах вида), иначе заводим новую.
  * Закреплённые дорожки не годятся. prefer по умолчанию: видео — самая нижняя, звук — первая звуковая.
  */
-function placeFree(p: Project, kind: TrackKind, start: number, end: number, prefer?: string, except?: string[]): { p: Project; id: string } {
+export function placeFree(p: Project, kind: TrackKind, start: number, end: number, prefer?: string, except?: string[]): { p: Project; id: string } {
   const list = p.tracks.filter((t) => t.kind === kind)
   let from = prefer ? list.findIndex((t) => t.id === prefer) : -1
   if (from < 0) from = kind === 'video' ? list.length - 1 : 0
@@ -218,7 +259,7 @@ function placeFree(p: Project, kind: TrackKind, start: number, end: number, pref
  * Приводит проект в порядок после любой правки: видеодорожки над звуковыми, а связанные субтитры
  * повторяют границы своего видео (нет видео — нет и субтитров). Если на дорожке субтитров стало тесно, они переезжают.
  */
-function finish(p0: Project): Project {
+export function finish(p0: Project): Project {
   let p = normalizeTracks(p0)
   const byId = new Map(p.items.map((i) => [i.id, i]))
   const stale: Item[] = []
@@ -267,7 +308,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), volume: 1, link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, volume: 1, gain: [], link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -337,8 +378,9 @@ export function splitItem(p: Project, id: string, t: number): { p: Project; id: 
   if (!it0 || lockedItem(p, it0) || t <= it0.start + MIN_ITEM || t >= itemEnd(it0) - MIN_ITEM) return { p, id: '' }
   const it = unlinked(it0)
   const cut = r3(it.in + (t - it.start))
-  const left: Item = { ...it, out: cut }
-  const right: Item = { ...it, id: uid('i'), start: r3(t), in: cut }
+  const g = splitGain(it.gain, it.volume, cut)
+  const left: Item = { ...it, out: cut, gain: g.left }
+  const right: Item = { ...it, id: uid('i'), start: r3(t), in: cut, gain: g.right }
   // правая половина субтитров, связанных с этим видео, привязывается к правой половине видео
   const rightSubs: Item[] =
     it.kind === 'media'
@@ -389,11 +431,7 @@ export function removeMedia(p: Project, mediaId: string): Project {
   delete words[mediaId]
   const covered = { ...p.covered }
   delete covered[mediaId]
-  return finish({ ...p, media: p.media.filter((m) => m.id !== mediaId), items: p.items.filter((i) => i.mediaId !== mediaId), words, covered })
-}
-
-export function patchItem(p: Project, id: string, patch: Partial<Pick<Item, 'volume'>>): Project {
-  return { ...p, items: p.items.map((i) => (i.id === id ? { ...i, ...patch } : i)) }
+  return finish({ ...p, media: p.media.filter((m) => m.id !== mediaId), items: p.items.filter((i) => i.mediaId !== mediaId), clips: p.clips.filter((c) => c.mediaId !== mediaId), words, covered })
 }
 
 /** Разорвать связь субтитров с видео: дальше они живут сами. */
@@ -415,7 +453,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, volume: 1, link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, volume: 1, gain: [], link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -685,11 +723,57 @@ export function snapTo(t: number, points: number[], tol: number): number {
 const num = (x: unknown, d: number): number => (typeof x === 'number' && Number.isFinite(x) ? x : d)
 const str = (x: unknown, d = ''): string => (typeof x === 'string' ? x : d)
 
+const r4 = (x: number): number => Math.round(x * 1000) / 1000
+
+/** Рамки из файла: битые выбрасываем, поля приводим к типам, границы — в пределах файла, без пересечений в одном файле. */
+function sanitizeClips(raw: unknown, media: MediaRef[]): Clip[] {
+  if (!Array.isArray(raw)) return []
+  const dur = new Map(media.map((m) => [m.id, m.duration]))
+  const text = (x: unknown, max: number): string => (typeof x === 'string' ? x.slice(0, max) : '')
+  const out: Clip[] = []
+  for (const x of raw) {
+    if (!x || typeof x !== 'object') continue
+    const c = x as Record<string, unknown>
+    const d = dur.get(c.mediaId as string)
+    if (d === undefined) continue
+    const start = num(c.start, -1)
+    const end = Math.min(d, num(c.end, -1))
+    if (start < 0 || end - start < MIN_CLIP / 2) continue
+    out.push({
+      id: typeof c.id === 'string' && c.id ? c.id.slice(0, 40) : uid('c'),
+      mediaId: c.mediaId as string,
+      start: r4(start),
+      end: r4(end),
+      title: text(c.title, 120),
+      description: text(c.description, 1000),
+      hashtags: Array.isArray(c.hashtags) ? c.hashtags.filter((h): h is string => typeof h === 'string').slice(0, 12) : [],
+      reason: text(c.reason, 400),
+      score: typeof c.score === 'number' && Number.isFinite(c.score) ? c.score : null,
+      approx: c.approx === true,
+      note: text(c.note, 400),
+      framing: c.framing === 'fit-blur' ? 'fit-blur' : 'crop',
+      offsetX: Math.min(1, Math.max(0, num(c.offsetX, 0.5))),
+      enabled: c.enabled !== false
+    })
+  }
+  // рамки одного файла не пересекаются: нахлёст обрезаем по началу следующей
+  out.sort((a, b) => (a.mediaId === b.mediaId ? a.start - b.start : a.mediaId < b.mediaId ? -1 : 1))
+  const res: Clip[] = []
+  for (const c of out) {
+    const prev = res[res.length - 1]
+    if (prev && prev.mediaId === c.mediaId && c.start < prev.end) {
+      if (c.end - prev.end < MIN_CLIP / 2) continue
+      res.push({ ...c, start: prev.end })
+    } else res.push(c)
+  }
+  return res
+}
+
 /** Проверка проекта из файла: битое выбрасываем, инварианты восстанавливаем. Формат v3 (с «Основной» дорожкой) переносится. */
 export function sanitizeProject(raw: unknown): Project | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
-  if (r.version !== 3 && r.version !== 4) return null
+  if (r.version !== 3 && r.version !== 4 && r.version !== 5 && r.version !== 6) return null
   const media: MediaRef[] = Array.isArray(r.media)
     ? (r.media as Array<Record<string, unknown>>)
         .filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string' && num(m.duration, 0) > 0)
@@ -709,6 +793,7 @@ export function sanitizeProject(raw: unknown): Project | null {
         }))
     : []
   const mediaIds = new Set(media.map((m) => m.id))
+  const mediaOf1 = (id: string): MediaRef | undefined => media.find((m) => m.id === id)
   let tracks: Track[] = Array.isArray(r.tracks)
     ? (r.tracks as Array<Record<string, unknown>>)
         .filter((t) => t && typeof t.id === 'string' && (t.kind === 'video' || t.kind === 'audio'))
@@ -727,6 +812,7 @@ export function sanitizeProject(raw: unknown): Project | null {
           const kind: ItemKind = i.kind === 'subs' ? 'subs' : 'media'
           // v3: у куска был флаг «показывать субтитры» — теперь это связанный кусок субтитров
           if (r.version === 3 && i.subs === true) legacySubs.push(i.id as string)
+          const media = mediaOf1(i.mediaId as string)
           return {
             id: i.id as string,
             kind,
@@ -735,7 +821,10 @@ export function sanitizeProject(raw: unknown): Project | null {
             start: Math.max(0, num(i.start, 0)),
             in: Math.max(0, num(i.in, 0)),
             out: num(i.out, 0),
-            volume: Math.min(4, Math.max(0, num(i.volume, 1))),
+            // до v6 звук всегда играл вместе с видео; у субтитров звука нет
+            audio: kind === 'media' && !!media?.hasAudio && i.audio !== false,
+            volume: Math.min(1, Math.max(0, num(i.volume, 1))),
+            gain: kind === 'media' ? cleanPoints(i.gain) : [],
             link: kind === 'subs' && typeof i.link === 'string' ? i.link : null
           }
         })
@@ -781,7 +870,7 @@ export function sanitizeProject(raw: unknown): Project | null {
       ? { w: even((r.canvas as Canvas).w), h: even((r.canvas as Canvas).h) }
       : null
   let p: Project = {
-    version: 4,
+    version: 6,
     id: str(r.id) || uid('p'),
     name: str(r.name, 'Проект').slice(0, 120) || 'Проект',
     createdAt: str(r.createdAt),
@@ -794,7 +883,8 @@ export function sanitizeProject(raw: unknown): Project | null {
     markers,
     words,
     covered,
-    clips: Array.isArray(r.clips) ? (r.clips as CutClip[]) : [],
+    // в v3/v4 рамок в этом виде не было (там лежали рамки старого режима в секундах таймлайна) — их не переносим
+    clips: r.version === 5 || r.version === 6 ? sanitizeClips(r.clips, media) : [],
     style: r.style && typeof r.style === 'object' ? (r.style as SubtitleStyle) : null
   }
   if (legacySubs.length > 0) p = addSubtitles(p, legacySubs)

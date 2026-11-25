@@ -7,7 +7,9 @@
  * они встают в тот же порядок слоёв, что и видео. Звук: все куски со звуком (кроме заглушённых дорожек)
  * задерживаются на свой start и сводятся без нормализации.
  */
-import { itemDur, itemEnd, mediaOf, projectDuration, type Project } from './project.ts'
+import { gainExpr, gainPeak } from './audio.ts'
+import { framingChain } from './cut.ts'
+import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
 export type ExportFormat = 'h264' | 'prores422'
 export type ExportQuality = 'high' | 'medium' | 'small'
@@ -20,6 +22,13 @@ export interface SubLayerInput {
   end: number
 }
 
+/** Кусок файла рамки заполняет кадр 9:16 по-своему (обрезка или блюр-фон); остальные куски вписываются как обычно. */
+export interface FramingOpt {
+  mediaId: string
+  mode: Framing
+  offsetX: number
+}
+
 export interface GraphOpts {
   W: number
   H: number
@@ -28,6 +37,8 @@ export interface GraphOpts {
   quality: ExportQuality
   /** слои субтитров; пусто — без субтитров */
   subLayers: SubLayerInput[]
+  /** кадрирование файла рамки (экспорт клипа) */
+  framing?: FramingOpt
 }
 
 export interface ExportCommand {
@@ -35,6 +46,10 @@ export interface ExportCommand {
   /** длина результата, с */
   total: number
 }
+
+/** Громкость куска: число без точек, иначе выражение по времени куска (звук к этому месту уже обрезан и начинается с нуля). */
+const volumeFilter = (it: Project['items'][number]): string =>
+  it.gain.length === 0 ? `volume=${it.volume.toFixed(3)}` : `volume='${gainExpr(it.gain, it.volume, it.in, itemDur(it))}':eval=frame`
 
 const f3 = (x: number): string => (Math.round(x * 1000) / 1000).toFixed(3)
 const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
@@ -65,8 +80,9 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
   for (const it of items) {
     const m = mediaOf(p, it.mediaId)
     if (!m) continue
-    const useV = m.hasVideo && !hidden.has(it.trackId)
-    const useA = m.hasAudio && !muted.has(it.trackId) && it.volume > 0
+    // картинку даёт только кусок на видеодорожке (звук, отделённый от видео, лежит на звуковой); звук — если он прикреплён и не нулевой
+    const useV = itemTrackKind(p, it) === 'video' && m.hasVideo && !hidden.has(it.trackId)
+    const useA = m.hasAudio && it.audio && !muted.has(it.trackId) && gainPeak(it.gain, it.volume, it.in, it.out) > 0
     if (!useV && !useA) continue
     const k = inputCount++
     inputs.push('-ss', f3(it.in), '-t', f3(itemDur(it)), '-i', m.path)
@@ -77,17 +93,23 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
         z: trackIdx.get(it.trackId) ?? 0,
         sort: it.start,
         apply: () => {
-          graph.push(
-            `[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,fps=${o.fps},setpts=PTS-STARTPTS+${s}/TB[v${k}]`,
-            `[${last}][v${k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`
-          )
+          const framed = o.framing && o.framing.mediaId === it.mediaId
+          if (framed && o.framing) {
+            graph.push(
+              `[${k}:v]fps=${o.fps},setpts=PTS-STARTPTS+${s}/TB[r${k}]`,
+              ...framingChain(`r${k}`, `v${k}`, o.framing.mode, o.framing.offsetX, W, H, String(k))
+            )
+          } else {
+            graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,fps=${o.fps},setpts=PTS-STARTPTS+${s}/TB[v${k}]`)
+          }
+          graph.push(`[${last}][v${k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
           last = `o${k}`
         }
       })
     }
     if (useA) {
       const ms = Math.round(it.start * 1000)
-      graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${it.volume.toFixed(3)},adelay=${ms}:all=1[a${k}]`)
+      graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,${volumeFilter(it)},adelay=${ms}:all=1[a${k}]`)
       aLabels.push(`a${k}`)
     }
   }

@@ -136,7 +136,7 @@ export interface ResolvedAi {
 export async function resolveAi(): Promise<ResolvedAi> {
   const s = await load()
   const apiKey = envKey() || decrypt(s.keys[s.provider])
-  if (!apiKey && !/localhost|127\.0\.0\.1/.test(s.baseUrl)) throw new Error('Не задан ключ ИИ: открой «Настройки ИИ» на вкладке «Клипы»')
+  if (!apiKey && !/localhost|127\.0\.0\.1/.test(s.baseUrl)) throw new Error('Не задан ключ ИИ: открой Настройки → ИИ и вставь ключ')
   let extra: Record<string, unknown> | undefined
   if (s.extra) {
     try {

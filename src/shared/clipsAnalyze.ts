@@ -14,7 +14,7 @@ import {
   type Segment,
   type WindowOpts
 } from './clips.ts'
-import { retryPrompt, systemPrompt, userPrompt, type ChatMessage } from './clipsPrompt.ts'
+import { coldViewerSystem, coldViewerUser, retryPrompt, systemPrompt, userPrompt, type ChatMessage } from './clipsPrompt.ts'
 import type { Word } from './types.ts'
 
 export interface ChatReply {
@@ -27,11 +27,15 @@ export interface AnalyzeOpts extends Partial<FinalizeOpts> {
   windows?: Partial<WindowOpts>
   /** сколько клипов просить у ИИ на окно; по умолчанию считается от maxClips */
   perWindow?: number
+  /** после поиска проверить каждый клип «холодным зрителем» (ещё один запрос) */
+  coldViewer?: boolean
 }
 
 export interface AnalyzeProgress {
   done: number
   total: number
+  /** find — поиск моментов, check — проверка «холодным зрителем» */
+  stage: 'find' | 'check'
 }
 
 export interface AnalyzeResult {
@@ -44,6 +48,8 @@ export interface AnalyzeResult {
   /** сколько кандидатов ИИ предложил и почему часть отсеяна */
   proposed: number
   stats: FinalizeStats
+  /** подсказки «холодного зрителя» по id клипа; нет записи — всё в порядке или проверка не удалась */
+  notes: Record<number, string>
 }
 
 export interface Estimate {
@@ -110,11 +116,86 @@ export async function analyzeClips(
     }
     if (parsed) raws.push(...parsed)
     else warnings.push(`Часть ${w.index + 1} из ${windows.length} пропущена: ответ ИИ не разобрался (${lastError})`)
-    onProgress?.({ done: w.index + 1, total: windows.length })
+    onProgress?.({ done: w.index + 1, total: windows.length, stage: 'find' })
   }
 
   if (warnings.length === windows.length) throw new Error(`ИИ ни разу не вернул разбираемый ответ. ${warnings[0]}`)
   const stats: FinalizeStats = { tooLong: 0, tooShort: 0, broken: 0, overlap: 0, approx: 0 }
   const clips = finalizeClips(words, segments, raws, fin, stats)
-  return { clips, segments, windows: windows.length, usage, warnings, proposed: raws.length, stats }
+  let notes: Record<number, string> = {}
+  if (opts.coldViewer && clips.length > 0) {
+    if (isCancelled()) throw new Error('Отменено')
+    try {
+      const r = await coldViewer(words, clips, chat)
+      notes = r.notes
+      usage.prompt += r.usage.prompt
+      usage.completion += r.usage.completion
+    } catch (e) {
+      // подсказки — не главное: без них рамки всё равно годятся
+      if (isCancelled()) throw new Error('Отменено')
+      warnings.push(`Проверка «холодным зрителем» не удалась: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    onProgress?.({ done: 1, total: 1, stage: 'check' })
+  }
+  return { clips, segments, windows: windows.length, usage, warnings, proposed: raws.length, stats, notes }
+}
+
+/** Текст клипа: слова, середина которых внутри границ. */
+export function wordsText(words: Word[], c: { start: number; end: number }): string {
+  return words
+    .filter((w) => (w.start + w.end) / 2 >= c.start && (w.start + w.end) / 2 <= c.end)
+    .map((w) => w.text)
+    .join(' ')
+}
+
+/** Разбор ответа «холодного зрителя»; непонятное молча пропускаем (проверка только подсказывает). */
+export function parseVerdicts(text: string, ids: number[]): Record<number, string> {
+  const t = text.trim()
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(t)
+  const body = fenced ? fenced[1] : t
+  const a = body.indexOf('{')
+  const b = body.lastIndexOf('}')
+  if (a === -1 || b <= a) throw new Error('в ответе нет JSON')
+  const root = JSON.parse(body.slice(a, b + 1)) as { verdicts?: unknown }
+  if (!Array.isArray(root.verdicts)) throw new Error('в JSON нет списка verdicts')
+  const known = new Set(ids)
+  const str = (x: unknown): string => (typeof x === 'string' ? x.trim().replace(/\s+/g, ' ').slice(0, 200) : '')
+  const out: Record<number, string> = {}
+  for (const v of root.verdicts) {
+    if (!v || typeof v !== 'object') continue
+    const r = v as Record<string, unknown>
+    const id = typeof r.id === 'number' ? r.id : Number(r.id)
+    if (!known.has(id) || r.ok === true) continue
+    const issue = str(r.issue)
+    if (!issue) continue
+    const fix = str(r.fix)
+    out[id] = fix ? `${issue}. ${fix}` : issue
+  }
+  return out
+}
+
+async function coldViewer(
+  words: Word[],
+  clips: ClipCandidate[],
+  chat: Chat
+): Promise<{ notes: Record<number, string>; usage: { prompt: number; completion: number } }> {
+  const items = clips.map((c) => ({ id: c.id, seconds: c.end - c.start, text: wordsText(words, c) }))
+  const messages: ChatMessage[] = [
+    { role: 'system', content: coldViewerSystem() },
+    { role: 'user', content: coldViewerUser(items) }
+  ]
+  const usage = { prompt: 0, completion: 0 }
+  let lastError = ''
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reply = await chat(messages)
+    usage.prompt += reply.usage?.prompt ?? 0
+    usage.completion += reply.usage?.completion ?? 0
+    try {
+      return { notes: parseVerdicts(reply.text, items.map((i) => i.id)), usage }
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e)
+      messages.push({ role: 'assistant', content: reply.text }, { role: 'user', content: retryPrompt(lastError) })
+    }
+  }
+  throw new Error(lastError)
 }

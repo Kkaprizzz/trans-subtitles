@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { buildSegments, buildWindows, parseClips, finalizeClips, findQuote, normWord, mmss, segmentLine } from './clips.ts'
-import { analyzeClips, estimateRun, windowCharsForTpm } from './clipsAnalyze.ts'
+import { analyzeClips, estimateRun, parseVerdicts, windowCharsForTpm } from './clipsAnalyze.ts'
 
 /** Синтетический подкаст: предложения по 8 слов (слово 0.3 с, пауза 0.05), между предложениями 0.4 с, каждое 10-е — пауза 1.5 с. */
 function transcript(sentences) {
@@ -201,6 +201,37 @@ await assert.rejects(analyzeClips(words, async () => ({ text: 'мусор' }), s
 await assert.rejects(analyzeClips(words, async () => { throw new Error('ключ не принят') }, small), /ключ не принят/)
 await assert.rejects(analyzeClips(words, fake, small, undefined, () => true), /Отменено/)
 await assert.rejects(analyzeClips([], fake), /Нет слов/)
+
+// --- «холодный зритель»
+assert.deepEqual(parseVerdicts('{"verdicts":[{"id":1,"ok":false,"issue":"не ясно, кто он","fix":"начать раньше"},{"id":2,"ok":true},{"id":9,"ok":false,"issue":"чужой id"},{"id":3,"ok":false,"issue":""}]}', [1, 2, 3]), { 1: 'не ясно, кто он. начать раньше' }, 'только неудачные из известных, без пустых')
+assert.deepEqual(parseVerdicts('```json\n{"verdicts":[{"id":"4","ok":false,"issue":"нет завязки"}]}\n```', [4]), { 4: 'нет завязки' }, 'id строкой и обёртка markdown')
+assert.throws(() => parseVerdicts('нет json', [1]), /нет JSON/)
+assert.throws(() => parseVerdicts('{"x":1}', [1]), /verdicts/)
+const coldCalls = []
+const withCold = async (messages) => {
+  if (messages[0].content.startsWith('Ты зритель')) {
+    coldCalls.push(messages)
+    const ids = [...messages[1].content.matchAll(/\[Ролик (\d+),/g)].map((m) => Number(m[1]))
+    return { text: JSON.stringify({ verdicts: ids.map((id) => ({ id, ok: id % 2 === 0, issue: 'не ясно', fix: 'раньше' })) }), usage: { prompt: 500, completion: 50 } }
+  }
+  return fake(messages)
+}
+const stages = []
+const rc = await analyzeClips(words, withCold, { ...small, coldViewer: true }, (p) => stages.push(p.stage))
+assert.equal(coldCalls.length, 1, 'проверка — один запрос на все клипы')
+assert.ok(coldCalls[0][1].content.includes('[Ролик 0,'), 'ИИ получает тексты клипов')
+assert.ok(Object.keys(rc.notes).length > 0 && Object.keys(rc.notes).every((id) => Number(id) % 2 === 1), 'подсказки только у «непонятных»')
+assert.equal(rc.usage.prompt, 1000 * rc.windows + 500)
+assert.equal(stages.at(-1), 'check')
+// проверка упала — клипы остаются, есть предупреждение
+const failCold = async (messages) => (messages[0].content.startsWith('Ты зритель') ? { text: 'мусор' } : fake(messages))
+const rf = await analyzeClips(words, failCold, { ...small, coldViewer: true })
+assert.ok(rf.clips.length > 0 && Object.keys(rf.notes).length === 0)
+assert.ok(rf.warnings.some((w) => /холодным зрителем/.test(w)))
+// без флага проверки нет
+coldCalls.length = 0
+await analyzeClips(words, withCold, small)
+assert.equal(coldCalls.length, 0)
 
 // --- оценка расхода
 const est = estimateRun(words, small)

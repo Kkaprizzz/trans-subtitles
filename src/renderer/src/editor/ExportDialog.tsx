@@ -1,7 +1,8 @@
 /** Диалог экспорта таймлайна одним файлом. */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { orderedClips } from '../../../shared/cut'
 import { projectDuration, timelineWords, type Project } from '../../../shared/project'
-import type { ExportRequest, ExportResult, H264Quality, ProgressEvent, RenderFormat } from '../../../shared/types'
+import type { ClipsExportResult, ExportRequest, ExportResult, H264Quality, ProgressEvent, RenderFormat } from '../../../shared/types'
 import { fmtTime } from '../format'
 
 interface Props {
@@ -27,6 +28,12 @@ export default function ExportDialog(p: Props): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ExportResult | null>(null)
+  const [clipsResult, setClipsResult] = useState<ClipsExportResult | null>(null)
+  // режим «Папка клипов»: список рамок с галочками (по умолчанию — включённые и стоящие на таймлайне)
+  const list = useMemo(() => orderedClips(p.project), [p.project])
+  const [mode, setMode] = useState<'timeline' | 'clips'>('timeline')
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(orderedClips(p.project).filter((c) => c.clip.enabled && c.at).map((c) => c.clip.id)))
+  const [writeText, setWriteText] = useState(true)
   const cv = p.project.canvas ?? { w: 1920, h: 1080 }
   const hasSubs = timelineWords(p.project).length > 0
   const dur = projectDuration(p.project)
@@ -36,9 +43,33 @@ export default function ExportDialog(p: Props): React.JSX.Element {
     void window.api.getAppSettings().then((st) => setS((x) => ({ ...x, format: st.exportFormat, quality: st.exportQuality })), () => {})
   }, [])
 
+  const runClips = async (): Promise<void> => {
+    setError(null)
+    setResult(null)
+    setClipsResult(null)
+    setBusy(true)
+    p.onBusy(true)
+    try {
+      const r = await window.api.exportClips(p.project, {
+        clipIds: list.filter((c) => picked.has(c.clip.id) && c.at).map((c) => c.clip.id),
+        quality: s.quality,
+        burnSubtitles: s.burn && hasSubs,
+        writeText
+      })
+      if (r) setClipsResult(r)
+    } catch (e) {
+      const msg = clean(e)
+      if (msg !== 'Отменено') setError(msg)
+    } finally {
+      setBusy(false)
+      p.onBusy(false)
+    }
+  }
+
   const run = async (): Promise<void> => {
     setError(null)
     setResult(null)
+    setClipsResult(null)
     setBusy(true)
     p.onBusy(true)
     try {
@@ -72,6 +103,82 @@ export default function ExportDialog(p: Props): React.JSX.Element {
           </button>
         </div>
         <div className="modal-body">
+          {list.length > 0 && (
+            <div className="seg" role="radiogroup" aria-label="Что экспортировать">
+              <button role="radio" aria-checked={mode === 'timeline'} className={mode === 'timeline' ? 'on' : ''} onClick={() => setMode('timeline')} disabled={busy}>
+                Весь таймлайн
+              </button>
+              <button role="radio" aria-checked={mode === 'clips'} className={mode === 'clips' ? 'on' : ''} onClick={() => setMode('clips')} disabled={busy}>
+                Папка клипов · {list.length}
+              </button>
+            </div>
+          )}
+          {mode === 'clips' ? (
+            <>
+              <p className="dim mono">1080×1920 · {p.project.fps} fps · MP4 · по ролику на клип</p>
+              <ul className="exp-clips">
+                {list.map(({ clip, at }, i) => (
+                  <li key={clip.id}>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={picked.has(clip.id) && !!at}
+                        disabled={!at || busy}
+                        onChange={(e) =>
+                          setPicked((x) => {
+                            const n = new Set(x)
+                            if (e.target.checked) n.add(clip.id)
+                            else n.delete(clip.id)
+                            return n
+                          })
+                        }
+                      />
+                      <span>
+                        {String(i + 1).padStart(2, '0')} · {clip.title || 'Без названия'}
+                      </span>
+                    </label>
+                    <span className="mono dim">{at ? `${(at.end - at.start).toFixed(0)} с` : 'видео убрано'}</span>
+                  </li>
+                ))}
+              </ul>
+              <label className="insp-row">
+                <span>Качество</span>
+                <select value={s.quality} onChange={(e) => setS({ ...s, quality: e.target.value as H264Quality })} disabled={busy}>
+                  <option value="high">Высокое</option>
+                  <option value="medium">Среднее</option>
+                  <option value="small">Малый размер</option>
+                </select>
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={s.burn && hasSubs} disabled={!hasSubs || busy} onChange={(e) => setS({ ...s, burn: e.target.checked })} />
+                <span>{hasSubs ? 'Вшить субтитры' : 'Субтитров на таймлайне нет'}</span>
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={writeText} disabled={busy} onChange={(e) => setWriteText(e.target.checked)} />
+                <span>Положить рядом .txt: заголовок, описание, хэштеги</span>
+              </label>
+              {busy && p.progress?.stage === 'render' && (
+                <div className="exp-progress">
+                  <span className="note-bar">
+                    <span style={{ transform: `scaleX(${p.progress.value})` }} />
+                  </span>
+                  <span className="mono dim">{p.progress.label}</span>
+                </div>
+              )}
+              {error && <p className="hint warn">{error}</p>}
+              {clipsResult && (
+                <p className="render-result">
+                  <span>
+                    Готово: {clipsResult.clips} клипов за {clipsResult.seconds.toFixed(0)} с, {fmtMB(clipsResult.bytes)}
+                  </span>
+                  <button className="link" onClick={() => void window.api.revealFile(clipsResult.files[0])}>
+                    Показать папку
+                  </button>
+                </p>
+              )}
+            </>
+          ) : (
+            <>
           <p className="dim mono">
             {cv.w}×{cv.h} · {p.project.fps} fps · {fmtTime(dur)}
           </p>
@@ -135,11 +242,17 @@ export default function ExportDialog(p: Props): React.JSX.Element {
               </button>
             </p>
           )}
+            </>
+          )}
         </div>
         <div className="modal-actions">
           {busy ? (
             <button className="btn" onClick={() => void window.api.cancelRender()}>
               Отменить
+            </button>
+          ) : mode === 'clips' ? (
+            <button className="btn primary" onClick={() => void runClips()} disabled={!list.some((c) => picked.has(c.clip.id) && c.at)}>
+              Экспортировать клипы
             </button>
           ) : (
             <button className="btn primary" onClick={() => void run()} disabled={dur <= 0 || (s.format === 'overlay' && !hasSubs)}>

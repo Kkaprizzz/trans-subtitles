@@ -3,11 +3,15 @@
  * Проект — в истории с отменой/повтором, автосохранение через 0.6 с после правки.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { fmtTime } from '../format'
+import { joinSelected } from '../../../shared/mix'
+import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
 import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
 import {
   addMarker,
   addMedia,
   addSubtitles,
+  activeAt,
   addTrackOf,
   applyRecognized,
   deleteItems,
@@ -23,6 +27,7 @@ import {
   projectDuration,
   removeMedia,
   setTlWordTiming,
+  sourceTime,
   splitAt,
   subsTargets,
   subtitleLayers,
@@ -36,6 +41,7 @@ import { fontFamilyOf } from '../../../shared/fonts'
 import { DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import type { MediaInfo, ProgressEvent } from '../../../shared/types'
 import { loadCustomFont } from '../customFont'
+import ClipsDialog, { type ClipsParams } from './ClipsDialog'
 import ExportDialog from './ExportDialog'
 import Inspector from './Inspector'
 import MediaPanel from './MediaPanel'
@@ -58,6 +64,8 @@ export interface EditorCommands {
   del(): void
   /** удалить и закрыть дыру (Shift+Delete) */
   delRipple(): void
+  /** соединить выделенные куски обратно (Ctrl+J) */
+  join(): void
   /** поставить метку на курсоре */
   addMarker(): void
   selectAll(): void
@@ -180,6 +188,12 @@ export default function Editor(p: Props): React.JSX.Element {
   const [selectedTrack, setSelectedTrack] = useState<string | null>(null)
   const [markerPopId, setMarkerPopId] = useState<string | null>(null)
   const [asrBusy, setAsrBusy] = useState(false)
+  // «Нарезка»: выбранная рамка, фокус на рамке, окошко и ход работы
+  const [selectedClip, setSelectedClip] = useState<string | null>(null)
+  const [focusClipId, setFocusClipId] = useState<string | null>(null)
+  const [clipsOpen, setClipsOpen] = useState(false)
+  const [clipsBusy, setClipsBusy] = useState(false)
+  const [clipsError, setClipsError] = useState<string | null>(null)
   const [fontTick, setFontTick] = useState(0)
   const stopAtRef = useRef<number | null>(null)
   const mounted = useRef(true)
@@ -255,6 +269,14 @@ export default function Editor(p: Props): React.JSX.Element {
   const tlWords = useMemo<TlWord[]>(() => timelineWordRefs(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
   const layers = useMemo(() => subtitleLayers(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
   const style = useMemo(() => normalizeStyle(project.style ?? DEFAULT_STYLE), [project.style])
+  const clipsPlaced = useMemo(() => project.clips.map((clip) => ({ clip, at: placement(project, clip) })), [project.clips, project.items]) // eslint-disable-line react-hooks/exhaustive-deps
+  const focusClip = focusClipId ? project.clips.find((c) => c.id === focusClipId) : undefined
+  const focusAt = focusClip ? placement(project, focusClip) : null
+  const focusRange = focusAt ? { start: focusAt.start, end: focusAt.end } : null
+  const focusRef = useRef(focusRange)
+  focusRef.current = focusRange
+  const clipView = useMemo(() => (focusClip && focusAt ? { mediaId: focusClip.mediaId, mode: focusClip.framing, offsetX: focusClip.offsetX } : null), [focusClip?.mediaId, focusClip?.framing, focusClip?.offsetX, !!focusAt]) // eslint-disable-line react-hooks/exhaustive-deps
+  const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
   // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
   const subsSelected = selected.some((id) => project.items.find((i) => i.id === id)?.kind === 'subs')
@@ -400,6 +422,14 @@ export default function Editor(p: Props): React.JSX.Element {
     const tick = (): void => {
       const t = clock.current.t0 + (performance.now() - clock.current.p0) / 1000
       const end = projectDuration(projectRef.current)
+      // фокус на клипе: проигрываем по кругу в границах рамки
+      const f = focusRef.current
+      if (f && t >= f.end) {
+        clock.current = { t0: f.start, p0: performance.now() }
+        setTime(f.start)
+        raf = requestAnimationFrame(tick)
+        return
+      }
       if (stopAtRef.current !== null && t >= stopAtRef.current) {
         stopAtRef.current = null
         setTime(t)
@@ -420,7 +450,8 @@ export default function Editor(p: Props): React.JSX.Element {
 
   const seek = useCallback((t: number) => {
     stopAtRef.current = null
-    const c = Math.max(0, Math.min(t, projectDuration(projectRef.current)))
+    const f = focusRef.current
+    const c = f ? Math.max(f.start, Math.min(t, f.end)) : Math.max(0, Math.min(t, projectDuration(projectRef.current)))
     clock.current = { t0: c, p0: performance.now() }
     setTime(c)
   }, [])
@@ -439,7 +470,8 @@ export default function Editor(p: Props): React.JSX.Element {
   const togglePlay = useCallback(() => {
     stopAtRef.current = null
     if (duration <= 0) return
-    if (!playing && time >= duration - 0.01) seek(0)
+    const f = focusRef.current
+    if (!playing && time >= (f ? f.end : duration) - 0.01) seek(f ? f.start : 0)
     setPlaying((v) => !v)
   }, [playing, time, duration, seek])
 
@@ -468,6 +500,18 @@ export default function Editor(p: Props): React.JSX.Element {
     commit(r.p)
     setMarkerPopId(r.id)
   }, [commit, selectedTrack, selected, time])
+  // Ctrl+J: соединить выделенные куски обратно; не вышло — говорим почему
+  const joinSel = (): void => {
+    const r = joinSelected(projectRef.current, selected)
+    if (r.error) {
+      p.onError(r.error)
+      return
+    }
+    p.onError(null)
+    commit(r.p)
+    if (r.id) setSelected([r.id])
+    flash(r.joined > 1 ? `Соединено стыков: ${r.joined}` : 'Куски соединены')
+  }
   const undo = (): void => dispatch({ type: 'undo' })
   const redo = (): void => dispatch({ type: 'redo' })
 
@@ -480,7 +524,7 @@ export default function Editor(p: Props): React.JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const el = e.target as HTMLElement | null
       if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes((el as HTMLInputElement).type)))) return
-      if (exportOpen || p.blocked) return
+      if (exportOpen || clipsOpen || p.blocked) return
       if (e.code === 'Escape' && markerPopId) {
         setMarkerPopId(null)
         return
@@ -505,6 +549,11 @@ export default function Editor(p: Props): React.JSX.Element {
       if (ctrl && e.code === 'KeyW') {
         e.preventDefault()
         void cmds.close()
+        return
+      }
+      if (ctrl && e.code === 'KeyJ') {
+        e.preventDefault()
+        joinSel()
         return
       }
       if (ctrl && e.code === 'KeyA') {
@@ -535,9 +584,13 @@ export default function Editor(p: Props): React.JSX.Element {
         addMarkerHere()
       } else if (e.code === 'Delete' || e.code === 'Backspace') {
         e.preventDefault()
-        del(e.shiftKey)
+        // рамка выбрана, а кусков нет — удаляем рамку
+        if (selectedClip && selected.length === 0) commit(deleteClip(projectRef.current, selectedClip))
+        else del(e.shiftKey)
       } else if (e.code === 'Escape') {
         if (markerPopId) setMarkerPopId(null)
+        else if (focusClipId) exitFocus()
+        else if (selectedClip) setSelectedClip(null)
         else setSelected([])
       } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
         e.preventDefault()
@@ -557,6 +610,40 @@ export default function Editor(p: Props): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   })
 
+  // --- распознавание (для субтитров и для «Нарезки») ---
+  /** Модель распознавания скачана? Нет — говорим об этом и открываем настройки. */
+  const ensureModel = async (): Promise<boolean> => {
+    const modelId = loadModelId()
+    try {
+      const m = (await window.api.listModels()).find((x) => x.id === modelId)
+      if (m && !m.installed) {
+        const msg = `Модель «${m.title}» не скачана. Скачай её в настройках («Распознавание речи»)`
+        p.onError(msg)
+        setClipsError(msg)
+        p.onOpenSettings('asr')
+        return false
+      }
+    } catch {
+      /* без проверки — пусть распознавание само скажет, что не так */
+    }
+    return true
+  }
+  type Recognized = { mediaId: string; from: number; to: number; words: import('../../../shared/types').Word[] }
+  /** Распознаёт недостающие отрезки; слова во времени файла. Применяются к проекту отдельно (за время работы его могли править). */
+  const recognize = async (pr: Project, jobs: ReturnType<typeof neededRanges>, base: string): Promise<Recognized[]> => {
+    const modelId = loadModelId()
+    const results: Recognized[] = []
+    for (let k = 0; k < jobs.length; k++) {
+      const j = jobs[k]
+      const m = mediaOf(pr, j.mediaId)
+      if (!m) continue
+      const label = jobs.length > 1 ? `${base} ${k + 1} из ${jobs.length}` : base
+      results.push({ ...j, words: await window.api.transcribeRange(m.path, modelId, j.from, j.to, label) })
+    }
+    return results
+  }
+  const applyAll = (pr: Project, results: Recognized[]): Project => results.reduce((acc, r) => applyRecognized(acc, r.mediaId, r.from, r.to, r.words), pr)
+
   // --- субтитры ---
   const subtitles = async (): Promise<void> => {
     if (asrBusy) return
@@ -566,38 +653,20 @@ export default function Editor(p: Props): React.JSX.Element {
       p.onError('Нет видео или звука со звуковой дорожкой: положи файл на таймлайн')
       return
     }
-    const modelId = loadModelId()
-    try {
-      const m = (await window.api.listModels()).find((x) => x.id === modelId)
-      if (m && !m.installed) {
-        p.onError(`Модель «${m.title}» не скачана. Скачай её в настройках («Распознавание речи»)`)
-        p.onOpenSettings('asr')
-        return
-      }
-    } catch {
-      /* без проверки — пусть распознавание само скажет, что не так */
-    }
+    if (!(await ensureModel())) return
     const jobs = neededRanges(pr, targets)
     setAsrBusy(true)
     setProgress(null)
     p.onError(null)
     try {
-      const results: Array<{ mediaId: string; from: number; to: number; words: import('../../../shared/types').Word[] }> = []
-      for (let k = 0; k < jobs.length; k++) {
-        const j = jobs[k]
-        const m = mediaOf(pr, j.mediaId)
-        if (!m) continue
-        const label = jobs.length > 1 ? `Субтитры ${k + 1} из ${jobs.length}` : 'Субтитры'
-        results.push({ ...j, words: await window.api.transcribeRange(m.path, modelId, j.from, j.to, label) })
-      }
+      const results = await recognize(pr, jobs, 'Субтитры')
       if (!mounted.current) return
-      // применяем к актуальному проекту: за время распознавания его могли править
-      let next = projectRef.current
-      for (const r of results) next = applyRecognized(next, r.mediaId, r.from, r.to, r.words)
+      let next = applyAll(projectRef.current, results)
       next = addSubtitles(next, targets.map((i) => i.id))
       commit(next)
       // выделяем созданные куски субтитров: справа сразу панель слов и стиля
       setSelected(next.items.filter((i) => i.kind === 'subs' && i.link && targets.some((t) => t.id === i.link)).map((i) => i.id))
+      setSelectedClip(null)
       setSubsSel(false)
       setSubsTab('words')
       setWordSel(-1)
@@ -611,6 +680,109 @@ export default function Editor(p: Props): React.JSX.Element {
       }
     }
   }
+
+  // --- «Нарезка» ---
+  /** Видео, над которым работает «Нарезка»: выделенное, иначе на самой нижней дорожке (как у субтитров). */
+  const clipsTarget = useMemo(() => {
+    const t = subsTargets(project, selected).filter((i) => mediaOf(project, i.mediaId)?.hasVideo)
+    return t[0] ?? null
+  }, [project, selected])
+  const openClips = (): void => {
+    if (!clipsTarget) {
+      p.onError('Положи на таймлайн видео со звуком и нажми «Нарезка»')
+      return
+    }
+    p.onError(null)
+    setClipsError(null)
+    setClipsOpen(true)
+  }
+  const runClips = async (o: ClipsParams): Promise<void> => {
+    const target = clipsTarget
+    if (!target || clipsBusy) return
+    setClipsError(null)
+    setClipsBusy(true)
+    setProgress(null)
+    try {
+      if (!(await ensureModel())) return
+      const pr = projectRef.current
+      const jobs = neededRanges(pr, [target])
+      const results = await recognize(pr, jobs, 'Распознаю речь для нарезки')
+      const withWords = applyAll(projectRef.current, results)
+      const media = mediaOf(withWords, target.mediaId)
+      const words = (withWords.words[target.mediaId] ?? []).filter((w) => w.start >= target.in && w.end <= target.out)
+      if (!media || words.length === 0) throw new Error('В этом отрезке нет речи: клипы искать негде')
+      const res = await window.api.analyzeClips({ words, minDur: o.minDur, maxDur: o.maxDur, count: o.count, mediaDuration: media.duration })
+      if (!mounted.current) return
+      if (res.clips.length === 0) {
+        // распознанные слова всё равно сохраняем: второй раз распознавать не придётся
+        if (results.length > 0) commit(withWords)
+        throw new Error(`ИИ не нашёл подходящих моментов${res.warnings.length ? `. ${res.warnings[0]}` : ''}. Попробуй изменить длину или число клипов`)
+      }
+      let next = applyAll(projectRef.current, results)
+      // субтитры нужны, чтобы вшить их в ролики; кусок мог исчезнуть за время работы
+      if (next.items.some((i) => i.id === target.id)) next = addSubtitles(next, [target.id])
+      const found = fromCandidates(target.mediaId, res.clips, res.notes)
+      next = putClips(next, target.mediaId, found, o.replace)
+      commit(next)
+      const added = found.filter((c) => next.clips.some((k) => k.id === c.id))
+      setSelected([])
+      setSelectedClip(added[0]?.id ?? null)
+      setClipsOpen(false)
+      flash(`Найдено рамок: ${added.length}${res.warnings.length ? ' (часть ответов ИИ не разобрана)' : ''}`)
+    } catch (e) {
+      const msg = clean(e)
+      if (mounted.current && msg !== 'Отменено') setClipsError(msg)
+    } finally {
+      if (mounted.current) {
+        setClipsBusy(false)
+        setProgress(null)
+      }
+    }
+  }
+  /** Рамка вручную: 30 с от курсора на видео под курсором. */
+  const addClipHere = (): void => {
+    const pr = projectRef.current
+    const under = activeAt(pr, time).filter((i) => i.kind === 'media' && mediaOf(pr, i.mediaId)?.hasVideo)
+    const it = under.at(-1) ?? clipsTarget
+    if (!it) {
+      p.onError('Поставь курсор на видео, чтобы отметить клип')
+      return
+    }
+    const at = time >= it.start && time <= itemEnd(it) ? sourceTime(it, time) : it.in
+    const r = addClip(pr, it.mediaId, at)
+    if (!r) {
+      p.onError('Здесь уже стоит другая рамка или файл закончился: подвинь курсор')
+      return
+    }
+    p.onError(null)
+    commit(r.p)
+    setSelected([])
+    setSubsSel(false)
+    setSelectedClip(r.id)
+  }
+  const onSelectClip = (id: string | null): void => {
+    setSelectedClip(id)
+    if (id) {
+      setSelected([])
+      setSubsSel(false)
+    }
+  }
+  const enterFocus = (id: string): void => {
+    const c = projectRef.current.clips.find((x) => x.id === id)
+    const at = c ? placement(projectRef.current, c) : null
+    if (!at) return
+    setPlaying(false)
+    setFocusClipId(id)
+    onSelectClip(id)
+    clock.current = { t0: at.start, p0: performance.now() }
+    setTime(at.start)
+  }
+  const exitFocus = (): void => setFocusClipId(null)
+  // рамку удалили или убрали видео — из фокуса выходим
+  useEffect(() => {
+    if (focusClipId && !focusRange) setFocusClipId(null)
+    if (selectedClip && !project.clips.some((c) => c.id === selectedClip)) setSelectedClip(null)
+  }, [project.clips, focusRange, focusClipId, selectedClip])
 
   const indexOfWord = (w: TlWord): number => tlWords.findIndex((x) => x.itemId === w.itemId && x.idx === w.idx)
   const onWordClick = (w: TlWord): void => {
@@ -682,7 +854,10 @@ export default function Editor(p: Props): React.JSX.Element {
   const patchStyle = (patch: Partial<SubtitleStyle>): void => commit({ ...projectRef.current, style: { ...style, ...patch } }, 'style')
   const selectItems = useCallback((ids: string[]) => {
     setSelected(ids)
-    if (ids.length > 0) setSubsSel(false)
+    if (ids.length > 0) {
+      setSubsSel(false)
+      setSelectedClip(null)
+    }
   }, [])
 
   const usedIds = useMemo(() => new Set(project.items.map((i) => i.mediaId)), [project.items])
@@ -746,6 +921,7 @@ export default function Editor(p: Props): React.JSX.Element {
     split,
     del: () => del(false),
     delRipple: () => del(true),
+    join: joinSel,
     addMarker: addMarkerHere,
     selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
     deselect: () => setSelected([]),
@@ -809,13 +985,15 @@ export default function Editor(p: Props): React.JSX.Element {
           onWordClick={onWordClick}
           onEditCommit={commitEdit}
           onEditCancel={() => setEditWord(null)}
+          clipView={clipView}
+          onOffset={focusClip ? (v) => commit(patchClip(projectRef.current, focusClip.id, { offsetX: v }), `co-${focusClip.id}`) : undefined}
         />
         <Transport
-          time={time}
-          duration={duration}
+          time={focusRange ? Math.max(0, time - focusRange.start) : time}
+          duration={focusRange ? focusRange.end - focusRange.start : duration}
           playing={playing}
           onTogglePlay={togglePlay}
-          onSeek={seek}
+          onSeek={(t) => seek(focusRange ? focusRange.start + t : t)}
           onScrubStart={scrubStart}
           onScrubEnd={scrubEnd}
           level={master.level}
@@ -823,7 +1001,7 @@ export default function Editor(p: Props): React.JSX.Element {
           muted={master.muted}
           onVolume={master.setVolume}
           onToggleMute={master.toggleMute}
-          info={`${project.canvas ? `${project.canvas.w}×${project.canvas.h}` : 'кадр — по первому видео'} · ${project.fps} fps`}
+          info={clipView ? `1080×1920 · ${project.fps} fps` : `${project.canvas ? `${project.canvas.w}×${project.canvas.h}` : 'кадр — по первому видео'} · ${project.fps} fps`}
         />
       </section>
 
@@ -849,10 +1027,23 @@ export default function Editor(p: Props): React.JSX.Element {
           onStyleReset={() => commit({ ...projectRef.current, style: null }, 'style')}
         />
       ) : (
-        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} />
+        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
       )}
 
       <section className="ed-timeline">
+        {focusClip && focusRange && (
+          <div className="tl-crumb">
+            <button className="btn small" onClick={exitFocus} title="Выйти из фокуса (Esc)">
+              ← К проекту
+            </button>
+            <span>
+              {mediaOf(project, focusClip.mediaId)?.name ?? 'Источник'} <span className="sep">›</span> <b>{focusClip.title || 'Клип'}</b>
+            </span>
+            <span className="mono dim">
+              {fmtTime(focusRange.end - focusRange.start)} · кадр 9:16 · {focusClip.framing === 'crop' ? 'кроп' : 'целиком на блюре'}
+            </span>
+          </div>
+        )}
         <div className="tl-tools">
           <button className="btn icon ghost" onClick={undo} disabled={hist.past.length === 0} title="Отменить (Ctrl+Z)" aria-label="Отменить">
             <Icon d={I.undo} />
@@ -883,8 +1074,11 @@ export default function Editor(p: Props): React.JSX.Element {
           >
             {asrBusy ? 'Распознаю…' : 'Субтитры'}
           </button>
-          <button className="btn" disabled title="Этап после субтитров: ИИ найдёт моменты в выделенном видео">
+          <button className="btn" onClick={openClips} disabled={project.items.length === 0 || clipsBusy} title="ИИ найдёт цельные моменты в выделенном видео (без выделения — в видео на самой нижней дорожке) и поставит рамки на строку «Клипы»">
             Нарезка
+          </button>
+          <button className="btn ghost" onClick={addClipHere} disabled={project.items.length === 0} title="Поставить рамку клипа на 30 с от курсора">
+            <Icon d={I.plus} /> Клип
           </button>
           <span className="spacer" />
           <button className="btn icon ghost" onClick={() => setZoomTick((z) => ({ n: z.n + 1, factor: 1 / 1.5 }))} title="Отдалить (Ctrl+−)" aria-label="Отдалить">
@@ -914,11 +1108,32 @@ export default function Editor(p: Props): React.JSX.Element {
           onWordPick={onWordPick}
           markerPopId={markerPopId}
           onMarkerPop={setMarkerPopId}
+          clips={clipsPlaced}
+          selectedClip={selectedClip}
+          onSelectClip={onSelectClip}
+          onClipOpen={enterFocus}
+          onMessage={(m) => p.onError(m)}
+          focus={focusRange}
           fitTick={fitTick}
           zoomTick={zoomTick}
         />
       </section>
 
+      {clipsOpen && clipsTarget && (
+        <ClipsDialog
+          project={project}
+          target={clipsTarget}
+          hasClips={project.clips.some((c) => c.mediaId === clipsTarget.mediaId)}
+          busy={clipsBusy}
+          progress={progress}
+          error={clipsError}
+          onRun={(o) => void runClips(o)}
+          onCancel={() => void window.api.cancelAnalyze()}
+          onClose={() => setClipsOpen(false)}
+          onOpenSettings={() => p.onOpenSettings('ai')}
+          settingsOpen={p.blocked}
+        />
+      )}
       {exportOpen && <ExportDialog project={project} progress={progress} onClose={() => setExportOpen(false)} onBusy={setExporting} />}
     </main>
   )

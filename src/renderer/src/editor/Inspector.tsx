@@ -1,6 +1,7 @@
 /** Инспектор: свойства выделенного куска или, если ничего не выделено, — проекта. */
-import { memo } from 'react'
-import { itemDur, itemEnd, mediaOf, patchItem, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Project } from '../../../shared/project'
+import { memo, useState } from 'react'
+import { deleteClip, patchClip, placement } from '../../../shared/cut'
+import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
 
@@ -11,6 +12,10 @@ interface Props {
   onSeek(t: number): void
   /** открыть окошко метки на таймлайне */
   onMarkerPop(id: string | null): void
+  /** выбранная рамка клипа (тогда показываем её свойства) */
+  clip: Clip | null
+  onFocusClip(id: string): void
+  onClipGone(): void
 }
 
 const CANVASES = [
@@ -23,8 +28,109 @@ const CANVASES = [
 ]
 const FPS = [24, 25, 30, 50, 60]
 
+const parseTags = (text: string): string[] =>
+  [...new Set(text.split(/[\s,]+/).map((x) => x.replace(/^#+/, '').slice(0, 30)).filter(Boolean))].slice(0, 12).map((x) => `#${x}`)
+
+/** Свойства рамки: тексты для публикации, способ кадрирования в 9:16, участие в экспорте. */
+function ClipPanel(p: { project: Project; clip: Clip; onCommit(next: Project, key?: string): void; onSeek(t: number): void; onFocus(id: string): void; onGone(): void }): React.JSX.Element {
+  const c = p.clip
+  const pr = p.project
+  const at = placement(pr, c)
+  const media = mediaOf(pr, c.mediaId)
+  const [tags, setTags] = useState(c.hashtags.join(' '))
+  const patch = (x: Parameters<typeof patchClip>[2], key?: string): void => p.onCommit(patchClip(pr, c.id, x), key)
+  return (
+    <aside className="inspector">
+      <div className="pane-head">
+        <span>Клип</span>
+      </div>
+      <div className="insp-body">
+        <label className="insp-col">
+          <span>Заголовок</span>
+          <input type="text" value={c.title} maxLength={120} placeholder="Название ролика" onChange={(e) => patch({ title: e.target.value }, `ct-${c.id}`)} />
+        </label>
+        <label className="insp-col">
+          <span>Описание</span>
+          <textarea rows={3} value={c.description} maxLength={1000} onChange={(e) => patch({ description: e.target.value }, `cd-${c.id}`)} />
+        </label>
+        <label className="insp-col">
+          <span>Хэштеги</span>
+          <input
+            type="text"
+            value={tags}
+            placeholder="#лес #подкаст"
+            onChange={(e) => {
+              setTags(e.target.value)
+              patch({ hashtags: parseTags(e.target.value) }, `ch-${c.id}`)
+            }}
+          />
+        </label>
+        <div className="insp-col">
+          <span>Кадр 9:16</span>
+          <div className="seg" role="radiogroup" aria-label="Способ кадрирования">
+            <button role="radio" aria-checked={c.framing === 'crop'} className={c.framing === 'crop' ? 'on' : ''} onClick={() => patch({ framing: 'crop' })}>
+              Кроп
+            </button>
+            <button role="radio" aria-checked={c.framing === 'fit-blur'} className={c.framing === 'fit-blur' ? 'on' : ''} onClick={() => patch({ framing: 'fit-blur' })}>
+              Целиком на блюре
+            </button>
+          </div>
+        </div>
+        {c.framing === 'crop' && (
+          <label className="insp-row">
+            <span>Сдвиг кадра</span>
+            <input type="range" min={0} max={1} step={0.01} value={c.offsetX} onChange={(e) => patch({ offsetX: Number(e.target.value) }, `co-${c.id}`)} />
+            <span className="mono">{Math.round(c.offsetX * 100)}%</span>
+          </label>
+        )}
+        {c.framing === 'crop' && <p className="hint">В режиме фокуса кадр можно двигать мышью прямо в превью.</p>}
+        <label className="check">
+          <input type="checkbox" checked={c.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
+          <span>Экспортировать этот клип</span>
+        </label>
+        {c.note && <p className="hint warn">Подсказка ИИ: {c.note}</p>}
+        {c.approx && <p className="hint warn">Границы приблизительные: ИИ не нашёл точные слова. Проверь начало и конец.</p>}
+        {c.reason && <p className="hint">Почему выбран: {c.reason}</p>}
+        <dl className="insp-grid mono">
+          <dt>Длина</dt>
+          <dd>{(c.end - c.start).toFixed(1)} с</dd>
+          <dt>Из файла</dt>
+          <dd>
+            {fmtTime(c.start)} – {fmtTime(c.end)}
+          </dd>
+          <dt>На таймлайне</dt>
+          <dd>{at ? `${fmtTime(at.start)} – ${fmtTime(at.end)}` : 'видео убрано'}</dd>
+          <dt>Файл</dt>
+          <dd title={media?.name}>{media?.name ?? '—'}</dd>
+          {c.score !== null && (
+            <>
+              <dt>Оценка ИИ</dt>
+              <dd>{c.score}/10</dd>
+            </>
+          )}
+        </dl>
+        <div className="insp-link">
+          <button className="btn small" onClick={() => p.onFocus(c.id)} disabled={!at}>
+            Открыть в фокусе
+          </button>
+          <button
+            className="btn small"
+            onClick={() => {
+              p.onCommit(deleteClip(pr, c.id))
+              p.onGone()
+            }}
+          >
+            Удалить рамку
+          </button>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
 function Inspector(p: Props): React.JSX.Element {
   const pr = p.project
+  if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
   const one = p.selected.length === 1 ? pr.items.find((i) => i.id === p.selected[0]) : undefined
   const m = one ? mediaOf(pr, one.mediaId) : undefined
 
@@ -53,20 +159,6 @@ function Inspector(p: Props): React.JSX.Element {
             <dt>Дорожка</dt>
             <dd>{track ? trackName(pr, track.id) : '—'}</dd>
           </dl>
-          {m.hasAudio && (
-            <label className="insp-row">
-              <span>Громкость</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={one.volume}
-                onChange={(e) => p.onCommit(patchItem(pr, one.id, { volume: Number(e.target.value) }), `vol-${one.id}`)}
-              />
-              <span className="mono">{Math.round(one.volume * 100)}%</span>
-            </label>
-          )}
           {subsOf(pr, one.id).length > 0 && (
             <div className="insp-link">
               <span className="dim">Субтитры едут вместе с этим видео</span>
@@ -75,7 +167,7 @@ function Inspector(p: Props): React.JSX.Element {
               </button>
             </div>
           )}
-          <p className="hint">S — разрезать по курсору, Delete — удалить, края куска тянутся мышью.</p>
+          <p className="hint">S — разрезать по курсору, Delete — удалить, Ctrl+J — соединить, правый щелчок — меню (в нём отделение звука). Громкость — линия на звуке куска.</p>
         </div>
       </aside>
     )

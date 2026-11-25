@@ -8,12 +8,15 @@
  * на момент начала жеста, чтобы правки не накапливались. Метки — флажки на дорожке: тянутся по времени,
  * щелчок открывает окошко (текст, цвет, удалить).
  */
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { rulerStep, timeToX, xToTime, zoomAt, type TimelineView } from '../../../shared/cut'
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { gainAt } from '../../../shared/audio'
+import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, joinWithNeighbor, moveGainPoint, setBaseVolume } from '../../../shared/mix'
+import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
   MARKER_COLORS,
   NEW_TRACK,
   addMarker,
+  deleteItems,
   deleteMarker,
   itemDur,
   itemEnd,
@@ -25,8 +28,10 @@ import {
   projectDuration,
   snapPoints,
   snapTo,
+  splitItem,
   trackName,
   trimItem,
+  type Clip,
   type Item,
   type Marker,
   type Project,
@@ -60,6 +65,15 @@ interface Props {
   /** какое окошко метки открыто */
   markerPopId: string | null
   onMarkerPop(id: string | null): void
+  /** рамки клипов с местом на таймлайне (null — видео с этим отрезком нет на таймлайне) */
+  clips: Array<{ clip: Clip; at: Placement | null }>
+  selectedClip: string | null
+  onSelectClip(id: string | null): void
+  onClipOpen(id: string): void
+  /** сообщение пользователю (почему операция не удалась) */
+  onMessage(msg: string): void
+  /** фокус на рамке: вне неё затемнено, вид приближен */
+  focus: { start: number; end: number } | null
   /** внешняя команда «показать всё» — меняется счётчик */
   fitTick: number
   zoomTick: { n: number; factor: number }
@@ -69,8 +83,14 @@ export const MEDIA_MIME = 'application/x-ts-media'
 export const MARKER_PALETTE = ['#f0a35a', '#ef6a5e', '#6fcf8e', '#5bb8ec', '#b48aec', '#ecd45b']
 const HEAD = 152
 const RULER = 24
-const H_VIDEO = 54
+/** картинка видеокуска, под ней узкая полоса его звука */
+const PIC_H = 54
+const STRIP_H = 24
+const STRIP_GAP = 2
+const H_VIDEO = PIC_H + STRIP_GAP + STRIP_H + 2
+const GAIN_PAD = 4
 const H_AUDIO = 46
+const H_CLIPS = 30
 const GAP = 4
 const SNAP_PX = 8
 const MAX_PPS = 300
@@ -81,21 +101,27 @@ interface Row {
   h: number
 }
 
-function layout(tracks: Track[]): { rows: Row[]; bottom: number } {
+function layout(tracks: Track[], clipsRow: boolean): { rows: Row[]; bottom: number; clipsTop: number | null } {
   let y = RULER + 8
+  const clipsTop = clipsRow ? y : null
+  if (clipsRow) y += H_CLIPS + GAP + 2
   const rows: Row[] = []
   for (const t of tracks) {
     const h = t.kind === 'video' ? H_VIDEO : H_AUDIO
     rows.push({ track: t, top: y, h })
     y += h + GAP
   }
-  return { rows, bottom: y }
+  return { rows, bottom: y, clipsTop }
 }
 
 type Drag =
   | { kind: 'move'; id: string; p0: Project; x0: number; y0: number; moved: boolean; grab: number }
   | { kind: 'trim'; id: string; edge: 'start' | 'end'; p0: Project; moved: boolean }
   | { kind: 'marker'; id: string; x0: number; moved: boolean }
+  | { kind: 'gain-base'; id: string; p0: Project; top: number; h: number }
+  | { kind: 'gain-pt'; id: string; idx: number; p0: Project; top: number; h: number }
+  | { kind: 'clip-move'; id: string; p0: Project; x0: number; moved: boolean }
+  | { kind: 'clip-trim'; id: string; edge: 'start' | 'end'; p0: Project; moved: boolean }
   | { kind: 'scrub' }
 
 const Svg = ({ d, size = 14 }: { d: string; size?: number }): React.JSX.Element => (
@@ -192,6 +218,43 @@ function SubsWords(p: {
   return <canvas ref={ref} className="tr-wave" style={{ width: p.width, height: p.height, bottom: 'auto', top: 0 }} />
 }
 
+/**
+ * Линия громкости поверх звука куска: без точек — горизонтальная (её тянут целиком), с точками — ломаная.
+ * Видна на выделенном куске и при наведении (CSS). Правый щелчок: по линии — добавить точку, по точке — удалить.
+ */
+function GainLine(p: {
+  item: Item
+  view: TimelineView
+  /** время таймлайна у левого края отрисованной части куска */
+  from: number
+  width: number
+  height: number
+  onBase(e: React.PointerEvent): void
+  onPoint(e: React.PointerEvent, idx: number): void
+  onLineMenu(e: React.MouseEvent): void
+  onPointMenu(e: React.MouseEvent, idx: number): void
+}): React.JSX.Element {
+  const it = p.item
+  const y = (v: number): number => GAIN_PAD + (1 - v) * (p.height - 2 * GAIN_PAD)
+  const x = (srcT: number): number => timeToX(it.start + (srcT - it.in), p.view) - timeToX(p.from, p.view)
+  const srcFrom = it.in + (p.from - it.start)
+  const srcTo = srcFrom + p.width / p.view.pps
+  const inner = it.gain.filter((pt) => pt.t > srcFrom && pt.t < srcTo)
+  const verts = [[0, y(gainAt(it.gain, it.volume, srcFrom))], ...inner.map((pt) => [x(pt.t), y(pt.v)]), [p.width, y(gainAt(it.gain, it.volume, srcTo))]]
+  const pts = verts.map((v) => `${v[0].toFixed(1)},${v[1].toFixed(1)}`).join(' ')
+  const lowered = it.gain.length === 0 && it.volume < 0.999
+  return (
+    <svg className={`tr-gain${it.gain.length ? ' pts' : ''}${lowered ? ' low' : ''}`} width={p.width} height={p.height}>
+      <polyline className="tr-gain-line" points={pts} />
+      <polyline className="tr-gain-hit" points={pts} onPointerDown={(e) => it.gain.length === 0 && p.onBase(e)} onContextMenu={p.onLineMenu} />
+      {it.gain.map((pt, idx) => {
+        if (pt.t < srcFrom - 0.001 || pt.t > srcTo + 0.001) return null
+        return <circle key={idx} className="tr-gain-pt" cx={x(pt.t)} cy={y(pt.v)} r={5} onPointerDown={(e) => p.onPoint(e, idx)} onContextMenu={(e) => p.onPointMenu(e, idx)} />
+      })}
+    </svg>
+  )
+}
+
 /** Окошко метки: текст, цвет, удалить. */
 function MarkerPop(p: { marker: Marker; x: number; y: number; onText(t: string): void; onColor(c: number): void; onDelete(): void; onClose(): void }): React.JSX.Element {
   const ref = useRef<HTMLInputElement>(null)
@@ -237,12 +300,18 @@ function Tracks(p: Props): React.JSX.Element {
   const [view, setView] = useState<TimelineView>({ start: 0, pps: 20 })
   const [ghost, setGhost] = useState<{ id: string; trackId: string; start: number; top: number; height: number } | null>(null)
   const [dropAt, setDropAt] = useState<{ x: number; top: number; height: number } | null>(null)
-  const [menu, setMenu] = useState<{ x: number; y: number; trackId: string; t: number } | null>(null)
+  type Menu =
+    | { kind: 'lane'; x: number; y: number; trackId: string; t: number }
+    | { kind: 'item'; x: number; y: number; itemId: string; t: number }
+    | { kind: 'line'; x: number; y: number; itemId: string; t: number }
+    | { kind: 'point'; x: number; y: number; itemId: string; idx: number }
+  const [menu, setMenu] = useState<Menu | null>(null)
   const dragRef = useRef<Drag | null>(null)
   const fitted = useRef(false)
 
   const duration = projectDuration(p.project)
-  const { rows, bottom } = useMemo(() => layout(p.project.tracks), [p.project.tracks])
+  const hasClips = p.project.clips.length > 0
+  const { rows, bottom, clipsTop } = useMemo(() => layout(p.project.tracks, hasClips), [p.project.tracks, hasClips])
   const wordsByItem = useMemo(() => {
     const m = new Map<string, TlWord[]>()
     for (const wd of p.words) m.set(wd.itemId, [...(m.get(wd.itemId) ?? []), wd])
@@ -280,6 +349,15 @@ function Tracks(p: Props): React.JSX.Element {
   useEffect(() => {
     if (p.fitTick > 0) fit()
   }, [p.fitTick]) // eslint-disable-line react-hooks/exhaustive-deps
+  // фокус на рамке: приближаем так, чтобы рамка заняла почти всю ширину
+  const focusStart = p.focus?.start
+  const focusEnd = p.focus?.end
+  useEffect(() => {
+    if (focusStart === undefined || focusEnd === undefined || w === 0) return
+    const len = Math.max(1, focusEnd - focusStart)
+    const pps = Math.min(MAX_PPS, (w * 0.92) / len)
+    setView(clampView({ pps, start: focusStart - (w * 0.04) / pps }))
+  }, [focusStart, focusEnd, w]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (p.zoomTick.n > 0) setView((v) => clampView(zoomAt(v, p.zoomTick.factor, Math.max(0, timeToX(p.time, v)), minPps, MAX_PPS)))
   }, [p.zoomTick]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -331,8 +409,9 @@ function Tracks(p: Props): React.JSX.Element {
     return { x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0) }
   }
   const tol = SNAP_PX / view.pps
-  const rowAt = (y: number): Row | 'above' | 'below' | null => {
+  const rowAt = (y: number): Row | 'above' | 'below' | 'clips' | null => {
     if (y < RULER) return null
+    if (clipsTop !== null && y >= clipsTop - GAP / 2 && y < clipsTop + H_CLIPS + GAP / 2) return 'clips'
     if (rows.length && y < rows[0].top - GAP / 2) return 'above'
     for (const r of rows) if (y >= r.top - GAP / 2 && y < r.top + r.h + GAP / 2) return r
     return 'below'
@@ -373,6 +452,7 @@ function Tracks(p: Props): React.JSX.Element {
     dragRef.current = { kind: 'scrub' }
     if (y >= RULER) {
       p.onSelect([])
+      p.onSelectClip(null)
       const r = rowAt(y)
       p.onSelectTrack(r && typeof r === 'object' ? r.track.id : null)
     }
@@ -386,7 +466,7 @@ function Tracks(p: Props): React.JSX.Element {
     const r = rowAt(y)
     if (!r || typeof r !== 'object') return
     p.onSelectTrack(r.track.id)
-    setMenu({ x, y, trackId: r.track.id, t: Math.max(0, xToTime(x, view)) })
+    setMenu({ kind: 'lane', x, y, trackId: r.track.id, t: Math.max(0, xToTime(x, view)) })
   }
 
   const startItem = (e: React.PointerEvent, it: Item, mode: 'move' | 'start' | 'end'): void => {
@@ -411,6 +491,93 @@ function Tracks(p: Props): React.JSX.Element {
     }
   }
 
+  const startGain = (e: React.PointerEvent, it: Item, top: number, h: number, idx: number | null): void => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    ;(e.currentTarget as unknown as Element).setPointerCapture(e.pointerId)
+    p.onMarkerPop(null)
+    p.onSelect([it.id])
+    p.onSelectClip(null)
+    p.onSelectTrack(it.trackId)
+    dragRef.current = idx === null ? { kind: 'gain-base', id: it.id, p0: p.project, top, h } : { kind: 'gain-pt', id: it.id, idx, p0: p.project, top, h }
+  }
+  const openMenu = (e: React.MouseEvent, make: (x: number, t: number, y: number) => Menu, it: Item): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    const { x, y } = local(e)
+    if (!p.selected.includes(it.id)) p.onSelect([it.id])
+    p.onSelectTrack(it.trackId)
+    setMenu(make(x, Math.max(0, xToTime(x, view)), y))
+  }
+  /** Пункты меню правой кнопки; run вызывается по щелчку, окно закрывается само. */
+  const menuEntries = (m: Menu): Array<{ label: string; run(): void }> => {
+    const pr = p.project
+    const say = (error?: string): void => {
+      if (error) p.onMessage(error)
+    }
+    if (m.kind === 'lane') return [{ label: 'Добавить метку', run: () => addMarkerAt(m.trackId, m.t) }]
+    const it = pr.items.find((i) => i.id === m.itemId)
+    if (!it) return []
+    if (m.kind === 'line') return [{ label: 'Добавить точку', run: () => p.onCommit(addGainPoint(pr, it.id, m.t).p) }]
+    if (m.kind === 'point') return [{ label: 'Удалить точку', run: () => p.onCommit(deleteGainPoint(pr, it.id, m.idx)) }]
+    const out: Array<{ label: string; run(): void }> = []
+    const media = mediaOf(pr, it.mediaId)
+    const own = pr.tracks.find((t) => t.id === it.trackId)
+    if (it.kind === 'media' && own?.kind === 'video' && media?.hasVideo && hasSound(pr, it)) {
+      out.push({
+        label: 'Отделить звук',
+        run: () => {
+          const r = detachAudio(pr, it.id)
+          if (r.error) say(r.error)
+          else p.onCommit(r.p)
+        }
+      })
+    }
+    if (it.kind === 'media' && own?.kind === 'audio' && media?.hasVideo) {
+      out.push({
+        label: 'Вернуть звук к видео',
+        run: () => {
+          const r = attachAudio(pr, it.id)
+          if (r.error) say(r.error)
+          else p.onCommit(r.p)
+        }
+      })
+    }
+    out.push({
+      label: 'Разрезать здесь',
+      run: () => {
+        const r = splitItem(pr, it.id, m.t)
+        if (!r.id) say('Здесь не разрезать: слишком близко к краю куска или дорожка закреплена')
+        else p.onCommit(r.p)
+      }
+    })
+    for (const side of ['left', 'right'] as const) {
+      if (!canJoin(pr, it.id, side)) continue
+      out.push({
+        label: side === 'left' ? 'Соединить с левым' : 'Соединить с правым',
+        run: () => {
+          const r = joinWithNeighbor(pr, it.id, side)
+          if (r.error) say(r.error)
+          else p.onCommit(r.p)
+        }
+      })
+    }
+    const ids = p.selected.includes(it.id) ? p.selected : [it.id]
+    out.push({ label: 'Удалить', run: () => p.onCommit(deleteItems(pr, ids, false)) })
+    out.push({ label: 'Удалить и закрыть дыру', run: () => p.onCommit(deleteItems(pr, ids, true)) })
+    out.push({ label: 'Добавить метку', run: () => addMarkerAt(it.trackId, m.t) })
+    return out
+  }
+
+  const startClip = (e: React.PointerEvent, c: Clip, mode: 'move' | 'start' | 'end'): void => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    p.onMarkerPop(null)
+    p.onSelectClip(c.id)
+    dragRef.current = mode === 'move' ? { kind: 'clip-move', id: c.id, p0: p.project, x0: local(e).x, moved: false } : { kind: 'clip-trim', id: c.id, edge: mode, p0: p.project, moved: false }
+  }
+
   const startMarker = (e: React.PointerEvent, m: Marker): void => {
     if (e.button !== 0) return
     e.stopPropagation()
@@ -431,6 +598,36 @@ function Tracks(p: Props): React.JSX.Element {
       d.moved = true
       p.onMarkerPop(null)
       p.onCommit(moveMarker(p.project, d.id, Math.max(0, xToTime(x, view))), `marker-${d.id}`)
+      return
+    }
+    if (d.kind === 'gain-base') {
+      p.onCommit(setBaseVolume(d.p0, d.id, 1 - (y - d.top - GAIN_PAD) / (d.h - 2 * GAIN_PAD)), `gb-${d.id}`)
+      return
+    }
+    if (d.kind === 'gain-pt') {
+      const it = d.p0.items.find((i) => i.id === d.id)
+      if (!it) return
+      let t = xToTime(x, view)
+      // точки липнут к краям куска и курсору (Alt — свободно)
+      if (!e.altKey) t = snapTo(t, [it.start, itemEnd(it), p.time], tol)
+      p.onCommit(moveGainPoint(d.p0, d.id, d.idx, t, 1 - (y - d.top - GAIN_PAD) / (d.h - 2 * GAIN_PAD)), `gp-${d.id}-${d.idx}`)
+      return
+    }
+    if (d.kind === 'clip-move') {
+      if (!d.moved && Math.abs(x - d.x0) < 3) return
+      d.moved = true
+      p.onCommit(moveClipBy(d.p0, d.id, (x - d.x0) / view.pps), `clip-${d.id}`)
+      return
+    }
+    if (d.kind === 'clip-trim') {
+      d.moved = true
+      const c = d.p0.clips.find((k) => k.id === d.id)
+      if (!c) return
+      let src = sourceAt(d.p0, c.mediaId, xToTime(x, view))
+      if (src === null) return
+      // края встают на границы слов (Alt — свободно)
+      if (!e.altKey) src = snapToWords(src, d.p0.words[c.mediaId] ?? [], d.edge, 14 / view.pps)
+      p.onCommit(setClipEdge(d.p0, d.id, d.edge, src), `clip-${d.id}-${d.edge}`)
       return
     }
     const snapOn = !e.altKey
@@ -460,7 +657,7 @@ function Tracks(p: Props): React.JSX.Element {
     let height = own?.h ?? H_VIDEO
     if (r === 'above' && kind === 'video') {
       trackId = NEW_TRACK
-      top = RULER + 2
+      top = (rows[0]?.top ?? RULER + 8) - 6
       height = 6
     } else if (r === 'below' && kind === 'audio') {
       trackId = NEW_TRACK
@@ -480,6 +677,11 @@ function Tracks(p: Props): React.JSX.Element {
     if (d?.kind === 'move' && d.moved && ghost) p.onCommit(moveItem(d.p0, d.id, ghost.trackId, ghost.start))
     // щелчок по метке без перетаскивания открывает её окошко
     if (d?.kind === 'marker' && !d.moved) p.onMarkerPop(d.id)
+    // щелчок по рамке без перетаскивания ставит курсор на её начало
+    if (d?.kind === 'clip-move' && !d.moved) {
+      const at = p.clips.find((k) => k.clip.id === d.id)?.at
+      if (at) p.onSeek(at.start)
+    }
     setGhost(null)
   }
 
@@ -491,7 +693,7 @@ function Tracks(p: Props): React.JSX.Element {
     const { x, y } = local(e)
     const r = rowAt(y)
     const row = r && typeof r === 'object' ? r : null
-    setDropAt({ x, top: row ? row.top : r === 'above' ? RULER + 2 : bottom - GAP, height: row ? row.h : 6 })
+    setDropAt({ x, top: row ? row.top : r === 'above' ? (rows[0]?.top ?? RULER + 8) - 6 : bottom - GAP, height: row ? row.h : 6 })
   }
   const onDrop = (e: React.DragEvent): void => {
     const id = e.dataTransfer.getData(MEDIA_MIME)
@@ -501,7 +703,7 @@ function Tracks(p: Props): React.JSX.Element {
     const { x, y } = local(e)
     const r = rowAt(y)
     const at = Math.max(0, xToTime(x, view))
-    p.onDropMedia(id, r === 'above' || r === 'below' ? NEW_TRACK : r ? r.track.id : null, snapTo(at, [...snapPoints(p.project), p.time], tol))
+    p.onDropMedia(id, r === 'above' || r === 'below' ? NEW_TRACK : r && typeof r === 'object' ? r.track.id : null, snapTo(at, [...snapPoints(p.project), p.time], tol))
   }
 
   const setTrack = (t: Track, patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): void =>
@@ -527,6 +729,12 @@ function Tracks(p: Props): React.JSX.Element {
     <div className="tracks" onDragOver={onDragOver} onDragLeave={() => setDropAt(null)} onDrop={onDrop}>
       <div className="tr-heads" style={{ width: HEAD }}>
         <div className="tr-head-ruler" style={{ height: RULER }} />
+        {clipsTop !== null && (
+          <div className="tr-head clips" style={{ top: clipsTop, height: H_CLIPS }}>
+            <span className="tr-name">Клипы</span>
+            <span className="tr-count mono">{p.project.clips.length}</span>
+          </div>
+        )}
         {rows.map((r) => {
           const t = r.track
           const video = t.kind === 'video'
@@ -577,6 +785,35 @@ function Tracks(p: Props): React.JSX.Element {
         {rows.map((r) => (
           <div key={r.track.id} className={`tr-lane${r.track.hidden ? ' hidden' : ''}${p.selectedTrack === r.track.id ? ' sel' : ''}`} style={{ top: r.top, height: r.h }} />
         ))}
+        {clipsTop !== null && <div className="tr-lane clips" style={{ top: clipsTop, height: H_CLIPS }} />}
+        {clipsTop !== null &&
+          p.clips.map(({ clip, at }) => {
+            if (!at || at.end < view.start || at.start > tEnd) return null
+            const visFrom = Math.max(at.start, view.start - 1 / view.pps)
+            const visTo = Math.min(at.end, tEnd + 1 / view.pps)
+            const left = timeToX(visFrom, view)
+            const width = Math.max(4, (visTo - visFrom) * view.pps)
+            const sel = p.selectedClip === clip.id
+            const cls = `tr-clip${sel ? ' sel' : ''}${clip.enabled ? '' : ' off'}${clip.note ? ' note' : ''}${clip.approx ? ' approx' : ''}`
+            return (
+              <div
+                key={clip.id}
+                className={cls}
+                style={{ left, width, top: clipsTop, height: H_CLIPS }}
+                onPointerDown={(e) => startClip(e, clip, 'move')}
+                onDoubleClick={() => p.onClipOpen(clip.id)}
+                title={`${clip.title || 'Клип'} · ${(clip.end - clip.start).toFixed(1)} с${clip.note ? `\nПодсказка ИИ: ${clip.note}` : ''}\nДвойной щелчок — фокус на клипе`}
+              >
+                {visFrom === at.start && <span className="tr-edge l" onPointerDown={(e) => startClip(e, clip, 'start')} />}
+                {width > 40 && (
+                  <span className="tr-clip-label">
+                    {clip.title || 'Клип'} <span className="mono">{(clip.end - clip.start).toFixed(0)} с</span>
+                  </span>
+                )}
+                {visTo === at.end && <span className="tr-edge r" onPointerDown={(e) => startClip(e, clip, 'end')} />}
+              </div>
+            )
+          })}
         {p.project.items.map((it) => {
           const row = rows.find((rr) => rr.track.id === it.trackId)
           if (!row) return null
@@ -588,43 +825,68 @@ function Tracks(p: Props): React.JSX.Element {
           const width = Math.max(2, (visTo - visFrom) * view.pps)
           const m = mediaOf(p.project, it.mediaId)
           const isSubs = it.kind === 'subs'
-          const isVideo = !isSubs && !!m?.hasVideo
+          const onVideoTrack = row.track.kind === 'video'
+          const isVideo = !isSubs && onVideoTrack && !!m?.hasVideo
           const sel = p.selected.includes(it.id)
           const pk = !isSubs && m ? p.peaks[m.id] : undefined
           const dragging = ghost?.id === it.id
           const locked = row.track.locked
+          const sound = hasSound(p.project, it)
+          // у видеокуска картинка сверху, звук — узкой полосой под ней; у звукового куска всё в одном
+          const picH = onVideoTrack ? PIC_H : row.h
           const cls = `tr-item ${isSubs ? 'subs' : isVideo ? 'video' : 'audio'}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
           const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : (m?.name ?? '—')
+          const srcFrom = it.in + (visFrom - it.start)
+          const srcTo = it.in + (visTo - it.start)
+          const itemMenu = (e: React.MouseEvent): void => openMenu(e, (x, t, y) => ({ kind: 'item', x, y, itemId: it.id, t }), it)
+          const gainHandlers = (top: number, h: number): React.ComponentProps<typeof GainLine> => ({
+            item: it,
+            view,
+            from: visFrom,
+            width: Math.round(width),
+            height: h,
+            onBase: (e) => startGain(e, it, top, h, null),
+            onPoint: (e, idx) => startGain(e, it, top, h, idx),
+            onLineMenu: (e) => openMenu(e, (x, t, y) => ({ kind: 'line', x, y, itemId: it.id, t }), it),
+            onPointMenu: (e, idx) => openMenu(e, (x, _t, y) => ({ kind: 'point', x, y, itemId: it.id, idx }), it)
+          })
           return (
-            <div
-              key={it.id}
-              className={cls}
-              style={{ left, width, top: row.top, height: row.h }}
-              onPointerDown={(e) => startItem(e, it, 'move')}
-              title={`${label} · ${fmtTime(it.start)}–${fmtTime(end)} · ${itemDur(it).toFixed(1)} с`}
-            >
-              {pk && (
-                <Wave peaks={pk} from={it.in + (visFrom - it.start)} to={it.in + (visTo - it.start)} width={Math.round(width)} height={isVideo ? Math.round(row.h * 0.45) : row.h - 2} />
+            <Fragment key={it.id}>
+              <div
+                className={cls}
+                style={{ left, width, top: row.top, height: picH }}
+                onPointerDown={(e) => startItem(e, it, 'move')}
+                onContextMenu={itemMenu}
+                title={`${label} · ${fmtTime(it.start)}–${fmtTime(end)} · ${itemDur(it).toFixed(1)} с`}
+              >
+                {pk && !onVideoTrack && <Wave peaks={pk} from={srcFrom} to={srcTo} width={Math.round(width)} height={row.h - 2} />}
+                {isSubs && (
+                  <SubsWords words={wordsByItem.get(it.id) ?? []} view={view} from={visFrom} to={visTo} width={Math.round(width)} height={picH - 2} selected={p.selectedWord} />
+                )}
+                {!isSubs && width > 36 && (
+                  <span className="tr-label">
+                    {label} <span className="mono">{itemDur(it).toFixed(1)} с</span>
+                  </span>
+                )}
+                {!locked && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
+                {!locked && visTo === end && <span className="tr-edge r" onPointerDown={(e) => startItem(e, it, 'end')} />}
+                {!onVideoTrack && sound && <GainLine {...gainHandlers(row.top, row.h)} />}
+              </div>
+              {isVideo && sound && (
+                <div
+                  className={`tr-astrip${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${locked ? ' locked' : ''}`}
+                  style={{ left, width, top: row.top + PIC_H + STRIP_GAP, height: STRIP_H }}
+                  onPointerDown={(e) => startItem(e, it, 'move')}
+                  onContextMenu={itemMenu}
+                  title={`Звук: ${label} · правый щелчок по линии — точки громкости`}
+                >
+                  {pk && <Wave peaks={pk} from={srcFrom} to={srcTo} width={Math.round(width)} height={STRIP_H - 2} />}
+                  {!locked && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
+                  {!locked && visTo === end && <span className="tr-edge r" onPointerDown={(e) => startItem(e, it, 'end')} />}
+                  <GainLine {...gainHandlers(row.top + PIC_H + STRIP_GAP, STRIP_H)} />
+                </div>
               )}
-              {isSubs && (
-                <SubsWords
-                  words={wordsByItem.get(it.id) ?? []}
-                  view={view}
-                  from={visFrom}
-                  to={visTo}
-                  width={Math.round(width)}
-                  height={row.h - 2}
-                  selected={p.selectedWord}
-                />
-              )}
-              {!isSubs && width > 36 && (
-                <span className="tr-label">
-                  {label} <span className="mono">{itemDur(it).toFixed(1)} с</span>
-                </span>
-              )}
-              {!locked && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
-              {!locked && visTo === end && <span className="tr-edge r" onPointerDown={(e) => startItem(e, it, 'end')} />}
-            </div>
+            </Fragment>
           )
         })}
         {p.project.markers.map((m) => {
@@ -653,6 +915,12 @@ function Tracks(p: Props): React.JSX.Element {
             </div>
           )
         })}
+        {p.focus && (
+          <>
+            <div className="tr-dim" style={{ left: 0, width: Math.max(0, timeToX(p.focus.start, view)), top: RULER, height: Math.max(h, bottom) }} />
+            <div className="tr-dim" style={{ left: Math.max(0, timeToX(p.focus.end, view)), right: 0, top: RULER, height: Math.max(h, bottom) }} />
+          </>
+        )}
         {ghost && ghostItem && (
           <div className="tr-ghost" style={{ left: timeToX(ghost.start, view), width: Math.max(2, itemDur(ghostItem) * view.pps), top: ghost.top, height: ghost.height }} />
         )}
@@ -679,16 +947,19 @@ function Tracks(p: Props): React.JSX.Element {
           />
         )}
         {menu && (
-          <div className="ctx" style={{ left: menu.x, top: menu.y }} onPointerDown={(e) => e.stopPropagation()} role="menu">
-            <button
-              role="menuitem"
-              onClick={() => {
-                addMarkerAt(menu.trackId, menu.t)
-                setMenu(null)
-              }}
-            >
-              <Svg d={I.flag} /> Добавить метку
-            </button>
+          <div className="ctx" style={{ left: Math.min(menu.x, Math.max(0, w - 210)), top: Math.min(menu.y, Math.max(0, h - 32 * menuEntries(menu).length - 14)) }} onPointerDown={(e) => e.stopPropagation()} role="menu">
+            {menuEntries(menu).map((en) => (
+              <button
+                key={en.label}
+                role="menuitem"
+                onClick={() => {
+                  en.run()
+                  setMenu(null)
+                }}
+              >
+                {en.label === 'Добавить метку' && <Svg d={I.flag} />} {en.label}
+              </button>
+            ))}
           </div>
         )}
       </div>

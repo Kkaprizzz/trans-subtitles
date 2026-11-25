@@ -1299,3 +1299,248 @@ textarea {
 .mk-track {
   font-size: 11px;
 }
+
+/* --- рамки клипов («Нарезка») --- */
+.tr-lane.clips {
+  background: #17151d;
+}
+.tr-head.clips {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  cursor: default;
+}
+.tr-count {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.tr-clip {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--c-clip);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+.tr-clip.sel {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.tr-clip.off {
+  opacity: 0.45;
+}
+.tr-clip.approx {
+  box-shadow: inset 0 0 0 1px rgba(236, 212, 91, 0.7);
+}
+.tr-clip.note::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 10px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ecd45b;
+}
+.tr-clip:active {
+  cursor: grabbing;
+}
+.tr-clip-label {
+  position: relative;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.tr-clip-label .mono {
+  color: rgba(237, 237, 240, 0.6);
+}
+.tr-dim {
+  position: absolute;
+  background: rgba(10, 10, 12, 0.62);
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* крошка фокуса на клипе */
+.tl-crumb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  height: 32px;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.tl-crumb b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.tl-crumb .sep {
+  color: var(--ink-3);
+}
+
+/* превью клипа 9:16 */
+.pl-frame .pl-bg {
+  position: absolute;
+  inset: -6%;
+  width: 112%;
+  height: 112%;
+  filter: blur(14px);
+  z-index: 0;
+}
+.pl-frame.offsettable {
+  cursor: ew-resize;
+}
+
+/* поля свойств клипа */
+.insp-col {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+}
+.insp-col > span {
+  color: var(--ink-2);
+}
+.insp-col input[type='text'],
+.insp-col textarea {
+  width: 100%;
+  padding: 7px 9px;
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font: inherit;
+  resize: vertical;
+}
+.insp-col input[type='text']:focus,
+.insp-col textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--panel-sunk);
+  border-radius: var(--radius);
+}
+.seg button {
+  flex: 1;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.seg button.on {
+  color: var(--ink);
+  background: var(--panel-3);
+}
+.clips-mode {
+  display: grid;
+  gap: 6px;
+}
+.crumb-btn {
+  margin-left: auto;
+}
+
+.exp-clips {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+}
+.exp-clips li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.exp-clips .mono {
+  white-space: nowrap;
+}
+
+/* --- звук видеокуска: узкая полоса под картинкой и линия громкости --- */
+.tr-astrip {
+  position: absolute;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--c-audio);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+.tr-astrip.sel {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.tr-astrip.muted {
+  filter: saturate(0.2) brightness(0.7);
+}
+.tr-astrip.lifted {
+  opacity: 0.4;
+}
+.tr-astrip:active {
+  cursor: grabbing;
+}
+.tr-gain {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.tr-gain.pts,
+.tr-gain.low {
+  opacity: 0.55;
+}
+.tr-astrip:hover .tr-gain,
+.tr-astrip.sel .tr-gain,
+.tr-item:hover > .tr-gain,
+.tr-item.sel > .tr-gain {
+  opacity: 1;
+}
+.tr-gain-line {
+  fill: none;
+  stroke: #f2f2f4;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.tr-gain-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  stroke-linejoin: round;
+  pointer-events: stroke;
+  cursor: ns-resize;
+}
+.tr-gain.pts .tr-gain-hit {
+  cursor: default;
+}
+.tr-gain-pt {
+  fill: var(--ink);
+  stroke: var(--accent);
+  stroke-width: 2;
+  pointer-events: all;
+  cursor: ns-resize;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tr-gain {
+    transition: none;
+  }
+}

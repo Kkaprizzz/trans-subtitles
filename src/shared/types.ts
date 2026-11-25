@@ -1,6 +1,5 @@
 /** Общие типы для main / preload / renderer. */
 import type { ClipCandidate } from './clips'
-import type { CutClip } from './cut'
 import type { Canvas, Project } from './project'
 import type { SubtitleStyle } from './timeline'
 
@@ -85,41 +84,6 @@ export interface RenderResult {
   bytes: number
 }
 
-export interface SavedProject {
-  words: Word[]
-  /** рамки режима «Нарезка» */
-  clips: CutClip[]
-  savedAt: string
-}
-
-/** Субтитры в клипах: вшить в видео, положить рядом отдельным оверлеем с альфой или без них */
-export type CutSubtitles = 'burn' | 'overlay' | 'none'
-
-export interface CutRenderRequest {
-  sourcePath: string
-  clips: CutClip[]
-  /** все слова исходника (уже со сдвигом); слова клипа выбираются по его рамке */
-  words: Word[]
-  style: SubtitleStyle
-  width: number
-  height: number
-  fps: number
-  quality: H264Quality
-  subtitles: CutSubtitles
-  /** класть рядом .txt с заголовком, описанием и хэштегами */
-  writeText: boolean
-  /** имя исходника без расширения — из него название папки */
-  sourceName: string
-}
-
-export interface CutRenderResult {
-  dir: string
-  files: string[]
-  clips: number
-  seconds: number
-  bytes: number
-}
-
 /** Строка списка проектов на стартовом экране. */
 export interface ProjectSummary {
   id: string
@@ -151,6 +115,24 @@ export interface ExportRequest {
   fps: number
   /** вшить субтитры кусков, у которых они включены */
   burnSubtitles: boolean
+}
+
+/** Экспорт клипов «Нарезки» в папку: по ролику 9:16 на выбранную рамку. */
+export interface ClipsExportRequest {
+  clipIds: string[]
+  quality: H264Quality
+  /** вшить субтитры (кусков субтитров на таймлайне в рамке) */
+  burnSubtitles: boolean
+  /** класть рядом .txt с заголовком, описанием и хэштегами */
+  writeText: boolean
+}
+
+export interface ClipsExportResult {
+  dir: string
+  files: string[]
+  clips: number
+  seconds: number
+  bytes: number
 }
 
 export interface ExportResult {
@@ -223,6 +205,8 @@ export interface AnalyzeResponse {
   clips: ClipCandidate[]
   warnings: string[]
   proposed: number
+  /** подсказки «холодного зрителя» по id клипа */
+  notes: Record<number, string>
   usage: { prompt: number; completion: number }
   seconds: number
 }
@@ -285,9 +269,6 @@ export interface Api {
   onPreviewProgress(cb: (e: { mediaPath: string; value: number }) => void): () => void
   /** Файлы, перетащенные в окно одним броском (только настоящее перетаскивание мышью) */
   onMediaDropped(cb: (r: { infos: MediaInfo[]; errors: string[] }) => void): () => void
-  /** Сохранённые правки слов для этого файла (или null) */
-  loadProject(mediaPath: string): Promise<SavedProject | null>
-  saveProject(mediaPath: string, words: Word[], clips: CutClip[]): Promise<void>
   /** Волна звука для таймлайна: pps пиков в секунду, 0..255 */
   peaks(mediaPath: string): Promise<{ pps: number; peaks: Uint8Array }>
   getAi(): Promise<AiSettings>
@@ -296,8 +277,8 @@ export interface Api {
   testAi(): Promise<string>
   analyzeClips(req: AnalyzeRequest): Promise<AnalyzeResponse>
   cancelAnalyze(): Promise<void>
-  /** null — пользователь закрыл диалог выбора папки */
-  renderClips(req: CutRenderRequest): Promise<CutRenderResult | null>
+  /** экспорт папки клипов 9:16; null — пользователь закрыл диалог выбора папки */
+  exportClips(p: Project, req: ClipsExportRequest): Promise<ClipsExportResult | null>
   /** null — пользователь закрыл диалог сохранения */
   render(req: RenderRequest): Promise<RenderResult | null>
   cancelRender(): Promise<void>
