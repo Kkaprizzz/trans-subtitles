@@ -4,14 +4,26 @@ import { stat } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { CUSTOM_EXT } from '../shared/fonts'
-import type { MediaInfo, ModelId, ProgressEvent, RenderRequest, Word } from '../shared/types'
-import { transcribe } from './asr'
+import { analyzeClips, windowCharsForTpm } from '../shared/clipsAnalyze'
+import { slug, type CutClip } from '../shared/cut'
+import type { AiSettingsPatch, AnalyzeRequest, CutRenderRequest, ExportRequest, MediaInfo, ModelId, ProgressEvent, RenderRequest, Word } from '../shared/types'
+import { getAiSettings, resolveAi, setAiSettings } from './aiConfig'
+import { renderClips } from './cutRender'
+import { chat } from './llm'
+import { getPeaks } from './peaks'
+import { deleteProject, duplicateProject, exportProjectFile, importProjectFile, listProjects, readProject, writeProject } from './projectStore'
+import { exportTimeline } from './exportTimeline'
+import { thumbnail } from './thumbs'
+import { newProject, sanitizeProject, type Project } from '../shared/project'
+import { readFile as readFileAsync } from 'node:fs/promises'
+import { transcribe, transcribeRange } from './asr'
 import { allowedFonts, allowFontFile } from './fontFiles'
 import { probeMedia } from './media'
 import { buildPreview } from './preview'
 import { downloadModel, listModels } from './models'
 import { loadProject, saveProject } from './projects'
-import { installUpdate, setupUpdater } from './updater'
+import { checkNow, installUpdate, setupUpdater } from './updater'
+import { cacheInfo, clearCache, getAppSettings, setAppSettings } from './appSettings'
 import { disposeRenderWindow, renderOverlay, type CancelToken } from './render'
 
 // Схема media:// отдаёт в <video> только те файлы, которые пользователь сам выбрал.
@@ -34,6 +46,8 @@ const MIME: Record<string, string> = {
   '.ogg': 'audio/ogg',
   '.opus': 'audio/ogg',
   '.flac': 'audio/flac',
+  '.jpg': 'image/jpeg',
+  '.png': 'image/png',
   '.ttf': 'font/ttf',
   '.otf': 'font/otf',
   '.woff': 'font/woff',
@@ -87,7 +101,9 @@ function createWindow(): void {
     height: 840,
     minWidth: 1000,
     minHeight: 640,
-    backgroundColor: '#111111',
+    backgroundColor: '#0d0d0f',
+    // своя верхняя строка с кнопками окна (как в CapCut): системную рамку убираем
+    frame: false,
     // показываем после первой отрисовки: сразу с заставкой, без пустого окна
     show: false,
     title: 'Trans Subtitles',
@@ -99,7 +115,13 @@ function createWindow(): void {
     }
   })
   win.setMenuBarVisibility(false)
-  win.once('ready-to-show', () => win?.show())
+  win.once('ready-to-show', () => {
+    win?.maximize()
+    win?.show()
+  })
+  const sendState = (): void => win?.webContents.send('win-state', { maximized: !!win?.isMaximized() })
+  win.on('maximize', sendState)
+  win.on('unmaximize', sendState)
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
@@ -147,9 +169,7 @@ function registerIpc(): void {
   ipcMain.handle('media:preview', async (_e, mediaPath: string) => {
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был открыт в приложении')
     const info = await probeMedia(mediaPath)
-    const out = await buildPreview(mediaPath, info.duration, (value) =>
-      win?.webContents.send('preview-progress', { mediaPath, value })
-    )
+    const out = await buildPreview(mediaPath, info.duration, (value) => win?.webContents.send('preview-progress', { mediaPath, value }), !!info.hasAlpha)
     allowedMedia.add(out)
     return out
   })
@@ -200,9 +220,242 @@ function registerIpc(): void {
     if (!allowedMedia.has(mediaPath)) return null
     return loadProject(mediaPath)
   })
-  ipcMain.handle('project:save', (_e, mediaPath: string, words: Word[]) => {
+  ipcMain.handle('project:save', (_e, mediaPath: string, words: Word[], clips: CutClip[]) => {
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
-    return saveProject(mediaPath, words)
+    return saveProject(mediaPath, words, Array.isArray(clips) ? clips : [])
+  })
+
+  // --- проекты монтажки ---
+  /** Файлы проекта разрешаем отдавать окну только после проверки ffprobe: это настоящие медиафайлы. */
+  const allowProjectMedia = async (p: Project): Promise<string[]> => {
+    const missing: string[] = []
+    for (const m of p.media) {
+      if (allowedMedia.has(m.path)) continue
+      try {
+        if (!existsSync(m.path)) throw new Error('нет файла')
+        const info = await probeMedia(m.path)
+        if (!info.hasVideo && !info.hasAudio) throw new Error('не медиа')
+        allowedMedia.add(m.path)
+      } catch {
+        missing.push(m.path)
+      }
+    }
+    return missing
+  }
+  ipcMain.handle('projects:list', () => listProjects())
+  ipcMain.handle('projects:create', async (_e, name: unknown) => {
+    const st = await getAppSettings()
+    const p = newProject(typeof name === 'string' && name.trim() ? name.trim().slice(0, 120) : 'Без названия')
+    const [w, h] = st.newCanvas === 'first' ? [0, 0] : st.newCanvas.split('x').map(Number)
+    return writeProject({ ...p, canvas: w && h ? { w, h } : null, fps: st.newFps || p.fps })
+  })
+
+  // --- настройки приложения, кэш, справка ---
+  ipcMain.handle('app:get-settings', () => getAppSettings())
+  ipcMain.handle('app:set-settings', (_e, patch: unknown) => setAppSettings(patch && typeof patch === 'object' ? (patch as object) : {}))
+  ipcMain.handle('app:pick-folder', async (_e, title: unknown) => {
+    if (!win) return null
+    const r = await dialog.showOpenDialog(win, { title: typeof title === 'string' ? title : 'Выбери папку', properties: ['openDirectory', 'createDirectory'] })
+    return r.canceled || !r.filePaths[0] ? null : r.filePaths[0]
+  })
+  ipcMain.handle('cache:info', () => cacheInfo())
+  ipcMain.handle('cache:clear', () => clearCache())
+  ipcMain.handle('app:open-data', () => shell.openPath(app.getPath('userData')).then(() => undefined))
+  ipcMain.handle('app:info', () => ({ version: app.getVersion(), packaged: app.isPackaged, repo: 'https://github.com/Kkaprizzz/trans-subtitles' }))
+  ipcMain.handle('update:check', () => checkNow((e) => win?.webContents.send('update', e)))
+  ipcMain.handle('app:external', (_e, url: unknown) => {
+    // наружу — только наш репозиторий
+    if (typeof url === 'string' && url.startsWith('https://github.com/Kkaprizzz/trans-subtitles')) return shell.openExternal(url)
+  })
+  ipcMain.handle('app:quit', () => app.quit())
+  ipcMain.handle('win:minimize', () => win?.minimize())
+  ipcMain.handle('win:toggle-max', () => {
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle('win:close', () => win?.close())
+  ipcMain.handle('win:is-max', () => !!win?.isMaximized())
+  ipcMain.handle('projects:open', async (_e, id: string) => {
+    const project = await readProject(id)
+    return { project, missing: await allowProjectMedia(project) }
+  })
+  ipcMain.handle('projects:write', async (_e, p: Project) => {
+    // писать можно только проект, файлы которого уже разрешены (открыты через диалог или проверены)
+    const clean = sanitizeProject(p)
+    if (!clean) throw new Error('Некорректный проект')
+    for (const m of clean.media) if (!allowedMedia.has(m.path)) throw new Error(`Файл не был добавлен через приложение: ${m.name}`)
+    return writeProject(clean)
+  })
+  ipcMain.handle('projects:delete', (_e, id: string) => deleteProject(id))
+  ipcMain.handle('projects:duplicate', (_e, id: string) => duplicateProject(id))
+  ipcMain.handle('projects:export-file', async (_e, id: string) => {
+    if (!win) return null
+    const p = await readProject(id)
+    const r = await dialog.showSaveDialog(win, {
+      title: 'Экспорт проекта',
+      defaultPath: join(app.getPath('documents'), `${slug(p.name) || 'Проект'}.tsproj`),
+      filters: [{ name: 'Проект Trans Subtitles', extensions: ['tsproj'] }]
+    })
+    if (r.canceled || !r.filePath) return null
+    const out = r.filePath.endsWith('.tsproj') ? r.filePath : `${r.filePath}.tsproj`
+    await exportProjectFile(id, out)
+    return out
+  })
+  ipcMain.handle('projects:import-file', async () => {
+    if (!win) return null
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Импорт проекта',
+      properties: ['openFile'],
+      filters: [{ name: 'Проект Trans Subtitles', extensions: ['tsproj', 'json'] }]
+    })
+    if (r.canceled || !r.filePaths[0]) return null
+    const raw = JSON.parse(await readFileAsync(r.filePaths[0], 'utf8')) as unknown
+    if (!sanitizeProject(raw)) throw new Error('Это не файл проекта Trans Subtitles или он повреждён')
+    return importProjectFile(r.filePaths[0])
+  })
+  ipcMain.handle('media:import', async () => {
+    if (!win) return []
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Добавить видео и звук',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Видео и аудио', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mp3', 'wav', 'm4a', 'aac', 'ogg', 'opus', 'flac'] },
+        { name: 'Все файлы', extensions: ['*'] }
+      ]
+    })
+    if (r.canceled) return []
+    const out: MediaInfo[] = []
+    for (const f of r.filePaths) {
+      try {
+        out.push(await openMedia(f))
+      } catch {
+        /* нечитаемый файл пропускаем */
+      }
+    }
+    return out
+  })
+  ipcMain.handle('media:thumb', async (_e, mediaPath: string, duration: number) => {
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
+    const t = await thumbnail(mediaPath, Number(duration) || 0)
+    allowedMedia.add(t)
+    return t
+  })
+  ipcMain.handle('export:timeline', async (_e, p: Project, req: ExportRequest) => {
+    if (!win) return null
+    if (renderCancel) throw new Error('Экспорт уже идёт')
+    const clean = sanitizeProject(p)
+    if (!clean) throw new Error('Некорректный проект')
+    for (const m of clean.media) if (!allowedMedia.has(m.path)) throw new Error(`Файл не был добавлен через приложение: ${m.name}`)
+    const ext =
+      req.format === 'prores422' ? 'mov' : req.format === 'overlay' ? (req.overlayFormat === 'h264-green' ? 'mp4' : 'mov') : 'mp4'
+    const suffix = req.format === 'overlay' ? '_subs' : ''
+    const forced = process.env['TS_RENDER_OUT']
+    let out = forced ? join(forced, `${slug(clean.name) || 'Проект'}${suffix}.${ext}`) : ''
+    if (!out) {
+      const r = await dialog.showSaveDialog(win, {
+        title: 'Экспорт видео',
+        defaultPath: join((await getAppSettings()).exportDir ?? app.getPath('videos'), `${slug(clean.name) || 'Проект'}${suffix}.${ext}`),
+        filters: [{ name: ext === 'mov' ? 'QuickTime MOV' : 'MP4', extensions: [ext] }]
+      })
+      if (r.canceled || !r.filePath) return null
+      out = extname(r.filePath).toLowerCase() === `.${ext}` ? r.filePath : `${r.filePath}.${ext}`
+    }
+    renderCancel = { cancelled: false }
+    try {
+      return await exportTimeline(clean, req, out, send, renderCancel)
+    } finally {
+      renderCancel = null
+    }
+  })
+
+  // --- «Нарезка» ---
+  ipcMain.handle('cut:peaks', (_e, mediaPath: string) => {
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
+    return getPeaks(mediaPath)
+  })
+  ipcMain.handle('ai:get', () => getAiSettings())
+  ipcMain.handle('ai:set', (_e, patch: AiSettingsPatch) => setAiSettings(patch && typeof patch === 'object' ? patch : {}))
+  ipcMain.handle('ai:test', async () => {
+    const ai = await resolveAi()
+    const started = Date.now()
+    const r = await chat(ai.cfg, [{ role: 'user', content: 'Ответь ровно этим JSON: {"ok":true}' }], {
+      extra: ai.extra,
+      retries: 0,
+      timeoutMs: 60_000,
+      maxTokens: 2000
+    })
+    let ok = false
+    try {
+      ok = (JSON.parse(r.text) as { ok?: unknown }).ok === true
+    } catch {
+      ok = false
+    }
+    const sec = ((Date.now() - started) / 1000).toFixed(1)
+    if (!ok) throw new Error(`Модель ответила, но не тем, что просили (${sec} с): ${r.text.slice(0, 80)}`)
+    return `Работает: ${ai.cfg.model}, ответ за ${sec} с`
+  })
+  ipcMain.handle('clips:analyze', async (_e, req: AnalyzeRequest) => {
+    if (analyzeAbort) throw new Error('Поиск моментов уже идёт')
+    if (!Array.isArray(req?.words) || req.words.length === 0) throw new Error('Нет слов: сначала распознай речь')
+    const num = (v: unknown, lo: number, hi: number, name: string): number => {
+      const n = Number(v)
+      if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`${name}: от ${lo} до ${hi}`)
+      return n
+    }
+    const minDur = num(req.minDur, 5, 600, 'Минимальная длина клипа')
+    const maxDur = num(req.maxDur, minDur + 1, 900, 'Максимальная длина клипа')
+    const count = Math.round(num(req.count, 1, 50, 'Число клипов'))
+    const ai = await resolveAi()
+    analyzeAbort = new AbortController()
+    const signal = analyzeAbort.signal
+    // с лимитом токенов в минуту — окна поменьше; без лимита весь подкаст идёт одним запросом
+    const maxTokens = ai.tpm ? 2500 : 32_000
+    const windows = ai.tpm
+      ? { maxChars: windowCharsForTpm(ai.tpm, maxTokens), overlapChars: 1500 }
+      : { maxChars: 400_000, overlapChars: 4000 }
+    const started = Date.now()
+    send({ stage: 'ai', value: 0.02, label: 'ИИ читает расшифровку…' })
+    try {
+      const res = await analyzeClips(
+        req.words,
+        (m) => chat(ai.cfg, m, { signal, maxTokens, extra: ai.extra, retries: 6 }),
+        { windows, minDur, maxDur, maxClips: count, mediaDuration: Number(req.mediaDuration) || undefined },
+        (p) => send({ stage: 'ai', value: p.done / p.total, label: `ИИ ищет моменты: часть ${p.done} из ${p.total}` }),
+        () => signal.aborted
+      )
+      return { clips: res.clips, warnings: res.warnings, proposed: res.proposed, usage: res.usage, seconds: (Date.now() - started) / 1000 }
+    } finally {
+      analyzeAbort = null
+    }
+  })
+  ipcMain.handle('clips:cancel', () => analyzeAbort?.abort())
+  ipcMain.handle('cut:render', async (_e, req: CutRenderRequest) => {
+    if (!win) return null
+    if (renderCancel) throw new Error('Рендер уже идёт')
+    if (!req?.sourcePath || !allowedMedia.has(req.sourcePath)) throw new Error('Исходник можно брать только из файла, выбранного через диалог')
+    if (req.style.font === 'custom' && req.style.customFontPath && !allowFontFile(req.style.customFontPath)) {
+      throw new Error('Файл своего шрифта не найден или не поддерживается. Выбери шрифт заново на вкладке «Стиль»')
+    }
+    // TS_RENDER_OUT — только для автотестов окна: папка без диалога
+    let parent = process.env['TS_RENDER_OUT']
+    if (!parent) {
+      const r = await dialog.showOpenDialog(win, {
+        title: 'Куда положить клипы',
+        defaultPath: app.getPath('videos'),
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (r.canceled || !r.filePaths[0]) return null
+      parent = r.filePaths[0]
+    }
+    const dir = freeDir(join(parent, `${slug(req.sourceName) || 'Видео'} — клипы`))
+    renderCancel = { cancelled: false }
+    try {
+      return await renderClips(req, dir, send, renderCancel)
+    } finally {
+      renderCancel = null
+    }
   })
 
   ipcMain.handle('font:pick', async () => {
@@ -222,11 +475,27 @@ function registerIpc(): void {
     assertModelId(id)
     return downloadModel(id, (value) => send({ stage: 'download', value, label: 'Скачиваю модель' }))
   })
+  ipcMain.handle('asr:transcribe-range', async (_e, mediaPath: string, id: unknown, start: unknown, end: unknown, label: unknown) => {
+    assertModelId(id)
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
+    const a = Number(start)
+    const b = Number(end)
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b <= a) throw new Error('Неверный отрезок для распознавания')
+    return transcribeRange(mediaPath, id, send, { start: a, end: b }, typeof label === 'string' ? label.slice(0, 80) : 'Распознаю речь')
+  })
   ipcMain.handle('asr:transcribe', (_e, mediaPath: string, id: unknown) => {
     assertModelId(id)
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
     return transcribe(mediaPath, id, send)
   })
+}
+
+let analyzeAbort: AbortController | null = null
+
+/** Папка, которой ещё нет: «Имя», «Имя (2)», «Имя (3)»… — чтобы не перезаписать прошлый рендер. */
+function freeDir(base: string): string {
+  if (!existsSync(base)) return base
+  for (let i = 2; ; i++) if (!existsSync(`${base} (${i})`)) return `${base} (${i})`
 }
 
 const MODEL_IDS: ModelId[] = ['gigaam-v3', 'whisper-small', 'whisper-turbo']
@@ -254,7 +523,9 @@ void app.whenReady().then(() => {
     return
   }
   createWindow()
-  win?.webContents.once('did-finish-load', () => setupUpdater((e) => win?.webContents.send('update', e)))
+  win?.webContents.once('did-finish-load', () => {
+    void getAppSettings().then((st) => setupUpdater((e) => win?.webContents.send('update', e), st.autoUpdate))
+  })
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

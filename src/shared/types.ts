@@ -1,4 +1,7 @@
 /** Общие типы для main / preload / renderer. */
+import type { ClipCandidate } from './clips'
+import type { CutClip } from './cut'
+import type { Canvas, Project } from './project'
 import type { SubtitleStyle } from './timeline'
 
 export interface Word {
@@ -19,6 +22,8 @@ export interface MediaInfo {
   videoCodec?: string
   /** окно не покажет картинку этого файла — нужна копия для превью */
   needsPreview: boolean
+  /** в видео есть прозрачность (оверлеи): копия для превью делается с альфой */
+  hasAlpha?: boolean
   width?: number
   height?: number
   fps?: number
@@ -40,7 +45,7 @@ export interface ModelStatus {
 }
 
 export interface ProgressEvent {
-  stage: 'audio' | 'asr' | 'download' | 'render'
+  stage: 'audio' | 'asr' | 'download' | 'render' | 'ai'
   /** 0..1 */
   value: number
   label: string
@@ -82,7 +87,144 @@ export interface RenderResult {
 
 export interface SavedProject {
   words: Word[]
+  /** рамки режима «Нарезка» */
+  clips: CutClip[]
   savedAt: string
+}
+
+/** Субтитры в клипах: вшить в видео, положить рядом отдельным оверлеем с альфой или без них */
+export type CutSubtitles = 'burn' | 'overlay' | 'none'
+
+export interface CutRenderRequest {
+  sourcePath: string
+  clips: CutClip[]
+  /** все слова исходника (уже со сдвигом); слова клипа выбираются по его рамке */
+  words: Word[]
+  style: SubtitleStyle
+  width: number
+  height: number
+  fps: number
+  quality: H264Quality
+  subtitles: CutSubtitles
+  /** класть рядом .txt с заголовком, описанием и хэштегами */
+  writeText: boolean
+  /** имя исходника без расширения — из него название папки */
+  sourceName: string
+}
+
+export interface CutRenderResult {
+  dir: string
+  files: string[]
+  clips: number
+  seconds: number
+  bytes: number
+}
+
+/** Строка списка проектов на стартовом экране. */
+export interface ProjectSummary {
+  id: string
+  name: string
+  updatedAt: string
+  duration: number
+  files: number
+  canvas: Canvas | null
+}
+
+export interface OpenedProject {
+  project: Project
+  /** файлы проекта, которых нет на диске (или они больше не читаются) */
+  missing: string[]
+}
+
+export type VideoFormat = 'h264' | 'prores422'
+
+export interface ExportRequest {
+  /** overlay — только субтитры отдельным файлом (с альфой или на зелёном) */
+  format: VideoFormat | 'overlay'
+  /** для overlay: формат файла субтитров */
+  overlayFormat?: RenderFormat
+  /** для overlay на зелёном: цвет фона #RRGGBB */
+  greenColor?: string
+  quality: H264Quality
+  width: number
+  height: number
+  fps: number
+  /** вшить субтитры кусков, у которых они включены */
+  burnSubtitles: boolean
+}
+
+export interface ExportResult {
+  path: string
+  seconds: number
+  bytes: number
+  /** длина ролика, с */
+  duration: number
+}
+
+/** Настройки приложения. */
+export interface AppSettings {
+  /** папка, которую по умолчанию предлагает экспорт; null — системная «Видео» */
+  exportDir: string | null
+  exportFormat: VideoFormat
+  exportQuality: H264Quality
+  /** кадр нового проекта: 'first' — по первому видео, иначе «ШxВ» */
+  newCanvas: string
+  /** FPS нового проекта; 0 — по первому видео */
+  newFps: number
+  autoUpdate: boolean
+}
+
+export interface CacheInfo {
+  previews: number
+  thumbs: number
+  peaks: number
+  dataDir: string
+}
+
+export interface AppInfo {
+  version: string
+  packaged: boolean
+  repo: string
+}
+
+export type AiProvider = 'deepseek' | 'groq' | 'custom'
+
+/** Настройки ИИ так, как их видит страница: сам ключ сюда не попадает. */
+export interface AiSettings {
+  provider: AiProvider
+  baseUrl: string
+  model: string
+  tpm: number | null
+  extra: string
+  hasKey: boolean
+  /** ключ хранится без системного хранилища ключей — предупредить */
+  weakKeyStorage: boolean
+}
+
+export interface AiSettingsPatch {
+  provider?: AiProvider
+  baseUrl?: string
+  model?: string
+  tpm?: number | null
+  extra?: string
+  /** новый ключ; пустая строка — удалить */
+  key?: string
+}
+
+export interface AnalyzeRequest {
+  words: Word[]
+  minDur: number
+  maxDur: number
+  count: number
+  mediaDuration: number
+}
+
+export interface AnalyzeResponse {
+  clips: ClipCandidate[]
+  warnings: string[]
+  proposed: number
+  usage: { prompt: number; completion: number }
+  seconds: number
 }
 
 export interface UpdateEvent {
@@ -92,12 +234,48 @@ export interface UpdateEvent {
 }
 
 export interface Api {
+  getAppSettings(): Promise<AppSettings>
+  setAppSettings(patch: Partial<AppSettings>): Promise<AppSettings>
+  /** диалог выбора папки; null — отмена */
+  pickFolder(title: string): Promise<string | null>
+  cacheInfo(): Promise<CacheInfo>
+  clearCache(): Promise<CacheInfo>
+  openDataDir(): Promise<void>
+  appInfo(): Promise<AppInfo>
+  /** проверить обновления сейчас; ответ — подпись для пользователя */
+  checkUpdates(): Promise<string>
+  openExternal(url: string): Promise<void>
+  quit(): Promise<void>
+  winMinimize(): Promise<void>
+  /** развернуть/вернуть; ответ — развёрнуто ли теперь */
+  winToggleMax(): Promise<boolean>
+  winClose(): Promise<void>
+  winIsMax(): Promise<boolean>
+  onWinState(cb: (s: { maximized: boolean }) => void): () => void
+  listProjects(): Promise<ProjectSummary[]>
+  createProject(name: string): Promise<Project>
+  openProject(id: string): Promise<OpenedProject>
+  /** сохраняет проект; возвращает его с обновлённой датой */
+  writeProject(p: Project): Promise<Project>
+  deleteProject(id: string): Promise<void>
+  duplicateProject(id: string): Promise<Project>
+  /** диалог «Сохранить как»; null — отмена */
+  exportProjectFile(id: string): Promise<string | null>
+  /** диалог открытия файла проекта; null — отмена */
+  importProjectFile(): Promise<Project | null>
+  /** диалог выбора файлов (несколько) для панели медиа */
+  importMedia(): Promise<MediaInfo[]>
+  thumbnail(mediaPath: string, duration: number): Promise<string>
+  /** экспорт таймлайна одним файлом (диалог «Сохранить как»); null — отмена */
+  exportTimeline(p: Project, req: ExportRequest): Promise<ExportResult | null>
   pickMedia(): Promise<MediaInfo | null>
   /** Только для разработки: файл из переменной окружения TS_OPEN. */
   devInitialMedia(): Promise<MediaInfo | null>
   listModels(): Promise<ModelStatus[]>
   downloadModel(id: ModelId): Promise<void>
   transcribe(mediaPath: string, id: ModelId): Promise<Word[]>
+  /** распознать отрезок файла; слова — во времени файла. label — подпись в строке состояния */
+  transcribeRange(mediaPath: string, id: ModelId, start: number, end: number, label: string): Promise<Word[]>
   /** Диалог выбора файла шрифта; null — отмена или неподходящий файл */
   pickFont(): Promise<{ path: string; name: string } | null>
   /** Разрешить показ ранее выбранного шрифта после перезапуска; false — файла больше нет */
@@ -105,11 +283,21 @@ export interface Api {
   /** Сделать (или взять из кэша) копию видео для превью; возвращает путь к копии */
   preparePreview(mediaPath: string): Promise<string>
   onPreviewProgress(cb: (e: { mediaPath: string; value: number }) => void): () => void
-  /** Файл, перетащенный в окно (только настоящее перетаскивание мышью) */
-  onMediaDropped(cb: (r: { info?: MediaInfo; error?: string }) => void): () => void
+  /** Файлы, перетащенные в окно одним броском (только настоящее перетаскивание мышью) */
+  onMediaDropped(cb: (r: { infos: MediaInfo[]; errors: string[] }) => void): () => void
   /** Сохранённые правки слов для этого файла (или null) */
   loadProject(mediaPath: string): Promise<SavedProject | null>
-  saveProject(mediaPath: string, words: Word[]): Promise<void>
+  saveProject(mediaPath: string, words: Word[], clips: CutClip[]): Promise<void>
+  /** Волна звука для таймлайна: pps пиков в секунду, 0..255 */
+  peaks(mediaPath: string): Promise<{ pps: number; peaks: Uint8Array }>
+  getAi(): Promise<AiSettings>
+  setAi(patch: AiSettingsPatch): Promise<AiSettings>
+  /** Короткий запрос к ИИ: проверить ключ и модель. Возвращает подпись для пользователя */
+  testAi(): Promise<string>
+  analyzeClips(req: AnalyzeRequest): Promise<AnalyzeResponse>
+  cancelAnalyze(): Promise<void>
+  /** null — пользователь закрыл диалог выбора папки */
+  renderClips(req: CutRenderRequest): Promise<CutRenderResult | null>
   /** null — пользователь закрыл диалог сохранения */
   render(req: RenderRequest): Promise<RenderResult | null>
   cancelRender(): Promise<void>

@@ -13,3 +13,8 @@ export function needsPreview(videoCodec: string | undefined, formatName: string 
   if (!PLAYABLE_CODECS.has(videoCodec)) return true
   return !PLAYABLE_CONTAINERS.some((re) => re.test(formatName ?? ''))
 }
+
+/** Есть ли в формате пикселей прозрачность (ProRes 4444, Animation, VP9 с альфой и т.п.). */
+export function hasAlphaPixFmt(pixFmt: string | undefined): boolean {
+  return !!pixFmt && /^(yuva|ya8|ya16|rgba|bgra|argb|abgr|gbrap|ayuv)/.test(pixFmt)
+}

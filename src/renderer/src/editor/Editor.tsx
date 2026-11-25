@@ -1,0 +1,925 @@
+/**
+ * Монтажный стол: верхняя панель, медиа слева, плеер, инспектор справа, таймлайн с дорожками внизу.
+ * Проект — в истории с отменой/повтором, автосохранение через 0.6 с после правки.
+ */
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
+import {
+  addMarker,
+  addMedia,
+  addSubtitles,
+  addTrackOf,
+  applyRecognized,
+  deleteItems,
+  deleteTlWord,
+  editTlText,
+  insertMedia,
+  itemEnd,
+  itemsOn,
+  mediaOf,
+  mergeTlWord,
+  neededRanges,
+  newProject,
+  projectDuration,
+  removeMedia,
+  setTlWordTiming,
+  splitAt,
+  subsTargets,
+  subtitleLayers,
+  timelineWordRefs,
+  videoTracks,
+  type MediaRef,
+  type Project,
+  type TlWord
+} from '../../../shared/project'
+import { fontFamilyOf } from '../../../shared/fonts'
+import { DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
+import type { MediaInfo, ProgressEvent } from '../../../shared/types'
+import { loadCustomFont } from '../customFont'
+import ExportDialog from './ExportDialog'
+import Inspector from './Inspector'
+import MediaPanel from './MediaPanel'
+import Player from './Player'
+import Transport, { useMasterVolume } from './Transport'
+import { loadModelId, type SettingsSection } from './SettingsDialog'
+import SubsPanel, { type SubsTab } from './SubsPanel'
+import Tracks, { type Peaks } from './Tracks'
+
+/** Команды редактора для верхнего меню (App вызывает их по пунктам меню). */
+export interface EditorCommands {
+  save(): Promise<void>
+  saveToFile(): Promise<void>
+  addMedia(): void
+  exportVideo(): void
+  close(): Promise<void>
+  undo(): void
+  redo(): void
+  split(): void
+  del(): void
+  /** удалить и закрыть дыру (Shift+Delete) */
+  delRipple(): void
+  /** поставить метку на курсоре */
+  addMarker(): void
+  selectAll(): void
+  deselect(): void
+  zoomIn(): void
+  zoomOut(): void
+  fit(): void
+  home(): void
+  end(): void
+}
+
+/** Что меню и строка заголовка должны знать о редакторе. */
+export interface EditorState {
+  name: string
+  canUndo: boolean
+  canRedo: boolean
+  hasSel: boolean
+  hasItems: boolean
+  duration: number
+  status: string | null
+  statusErr: boolean
+}
+
+interface Props {
+  projectId: string
+  onClose(): void
+  onError(msg: string | null): void
+  commands: React.MutableRefObject<EditorCommands | null>
+  onState(s: EditorState): void
+  /** окно поверх (меню, настройки) — горячие клавиши редактора молчат */
+  blocked: boolean
+  /** открыть настройки на нужном разделе (например, скачать модель) */
+  onOpenSettings(section: SettingsSection): void
+}
+
+/** Размеры панелей (тянутся мышью за границы), запоминаются между запусками. */
+interface Layout {
+  mw: number
+  iw: number
+  th: number
+}
+const LAYOUT_KEY = 'layout-v1'
+const LAYOUT_DEFAULT: Layout = { mw: 260, iw: 300, th: 300 }
+function loadLayout(): Layout {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY)
+    if (raw) return { ...LAYOUT_DEFAULT, ...(JSON.parse(raw) as Partial<Layout>) }
+  } catch {
+    /* умолчания */
+  }
+  return LAYOUT_DEFAULT
+}
+/** Пределы: плеру всегда остаётся не меньше 420px в ширину и 200px в высоту. */
+function clampLayout(l: Layout): Layout {
+  const W = window.innerWidth
+  const H = window.innerHeight
+  const mw = Math.min(Math.max(170, l.mw), Math.max(170, Math.min(560, W - 420 - Math.max(220, l.iw))))
+  const iw = Math.min(Math.max(220, l.iw), Math.max(220, Math.min(600, W - 420 - mw)))
+  const th = Math.min(Math.max(150, l.th), Math.max(150, H - 44 - 200))
+  return { mw: Math.round(mw), iw: Math.round(iw), th: Math.round(th) }
+}
+
+const reducer = histReducer as (h: Hist<Project>, a: HistAction<Project>) => Hist<Project>
+const clean = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+const toRef = (m: MediaInfo): Omit<MediaRef, 'id'> => ({
+  path: m.path,
+  name: m.name,
+  duration: m.duration,
+  hasVideo: m.hasVideo,
+  hasAudio: m.hasAudio,
+  width: m.width,
+  height: m.height,
+  fps: m.fps,
+  videoCodec: m.videoCodec,
+  needsPreview: m.needsPreview,
+  hasAlpha: m.hasAlpha
+})
+
+function Icon({ d }: { d: string }): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  )
+}
+const I = {
+  back: 'M15 5l-7 7 7 7',
+  undo: 'M8 6L3 11l5 5M4 11h10a5 5 0 010 10h-3',
+  redo: 'M16 6l5 5-5 5M20 11H10a5 5 0 000 10h3',
+  play: 'M8 5l11 7-11 7z',
+  pause: 'M8 5v14M16 5v14',
+  split: 'M12 3v18M7 8l-3 4 3 4M17 8l3 4-3 4',
+  del: 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13',
+  plus: 'M12 5v14M5 12h14',
+  minus: 'M5 12h14',
+  fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+  gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2.2.3-1.3-1.3L17 4.8 14 4l-1 2h-2l-1-2-3 .8.5 2.2-1.3 1.3L5 8l-1 3 2 1v0l-2 1 1 3 2.2-.3 1.3 1.3L7 19.2l3 .8 1-2h2l1 2 3-.8-.5-2.2 1.3-1.3 2.2.3 1-3z',
+  out: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6'
+}
+
+export default function Editor(p: Props): React.JSX.Element {
+  const [hist, dispatch] = useReducer(reducer, emptyHist<Project>(newProject('…')))
+  const project = hist.present
+  const [loaded, setLoaded] = useState(false)
+  const [missing, setMissing] = useState<Set<string>>(new Set())
+  const [time, setTime] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [selected, setSelected] = useState<string[]>([])
+  const [previews, setPreviews] = useState<Record<string, string>>({})
+  const [previewing, setPreviewing] = useState<Record<string, number>>({})
+  const [thumbs, setThumbs] = useState<Record<string, string>>({})
+  const [peaks, setPeaks] = useState<Record<string, Peaks>>({})
+  const [exportOpen, setExportOpen] = useState(false)
+  const [savedNote, setSavedNote] = useState<string | null>(null)
+  // субтитры: выбранная дорожка, вкладка, слово, окошко правки в кадре, идёт ли распознавание
+  const [subsSel, setSubsSel] = useState(false)
+  const [subsTab, setSubsTab] = useState<SubsTab>('words')
+  const [wordSel, setWordSel] = useState(-1)
+  const [editWord, setEditWord] = useState<TlWord | null>(null)
+  const [selectedTrack, setSelectedTrack] = useState<string | null>(null)
+  const [markerPopId, setMarkerPopId] = useState<string | null>(null)
+  const [asrBusy, setAsrBusy] = useState(false)
+  const [fontTick, setFontTick] = useState(0)
+  const stopAtRef = useRef<number | null>(null)
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  const [layout, setLayout] = useState<Layout>(() => clampLayout(loadLayout()))
+  const [resizing, setResizing] = useState<keyof Layout | null>(null)
+  const resizeRef = useRef<{ which: keyof Layout; x: number; y: number; start: Layout } | null>(null)
+  useEffect(() => {
+    const h = setTimeout(() => {
+      try {
+        localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout))
+      } catch {
+        /* не критично */
+      }
+    }, 300)
+    return () => clearTimeout(h)
+  }, [layout])
+  useEffect(() => {
+    const onResize = (): void => setLayout((l) => clampLayout(l))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const splitter = (which: keyof Layout, cls: string): React.JSX.Element => (
+    <div
+      className={`splitter ${which === 'th' ? 'h' : 'v'} ${cls}${resizing === which ? ' drag' : ''}`}
+      role="separator"
+      aria-orientation={which === 'th' ? 'horizontal' : 'vertical'}
+      title="Тяни, чтобы изменить размер · двойной щелчок — как было"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+        resizeRef.current = { which, x: e.clientX, y: e.clientY, start: layout }
+        setResizing(which)
+      }}
+      onPointerMove={(e) => {
+        const r = resizeRef.current
+        if (!r) return
+        const dx = e.clientX - r.x
+        const dy = e.clientY - r.y
+        const next = { ...r.start }
+        if (r.which === 'mw') next.mw = r.start.mw + dx
+        else if (r.which === 'iw') next.iw = r.start.iw - dx
+        else next.th = r.start.th - dy
+        setLayout(clampLayout(next))
+      }}
+      onPointerUp={() => {
+        resizeRef.current = null
+        setResizing(null)
+      }}
+      onPointerCancel={() => {
+        resizeRef.current = null
+        setResizing(null)
+      }}
+      onDoubleClick={() => setLayout((l) => clampLayout({ ...l, [which]: LAYOUT_DEFAULT[which] }))}
+    />
+  )
+  const [exporting, setExporting] = useState(false)
+  const [progress, setProgress] = useState<ProgressEvent | null>(null)
+  const [fitTick, setFitTick] = useState(0)
+  const [zoomTick, setZoomTick] = useState({ n: 0, factor: 1 })
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const prepared = useRef(new Set<string>())
+  const projectRef = useRef(project)
+  projectRef.current = project
+
+  const commit = useCallback((next: Project, key?: string) => dispatch({ type: 'commit', words: next, key, now: Date.now() }), [])
+  const duration = projectDuration(project)
+  const tlWords = useMemo<TlWord[]>(() => timelineWordRefs(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
+  const layers = useMemo(() => subtitleLayers(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
+  const style = useMemo(() => normalizeStyle(project.style ?? DEFAULT_STYLE), [project.style])
+  const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
+  // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
+  const subsSelected = selected.some((id) => project.items.find((i) => i.id === id)?.kind === 'subs')
+
+  // Шрифт грузится лениво: ждём его и перерисовываем подписи (от шрифта зависит и перенос строк).
+  useEffect(() => {
+    if (tlWords.length === 0) return
+    let cancelled = false
+    void (async () => {
+      if (style.font === 'custom' && style.customFontPath) {
+        const ok = (await window.api.allowFont(style.customFontPath)) && (await loadCustomFont(style.customFontPath))
+        if (!ok && !cancelled) p.onError(`Не удалось загрузить шрифт «${style.customFontName || style.customFontPath}»: показываю запасной. Выбери файл заново на вкладке «Стиль»`)
+      }
+      const family = fontFamilyOf(style)
+      const sample = [...new Set(tlWords.map((w) => w.text).join(''))].join('') + 'АаЯя'
+      await document.fonts.load(`${style.weight} 40px ${family}`, style.uppercase ? sample + sample.toUpperCase() : sample)
+      if (!cancelled) setFontTick((n) => n + 1)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [style.font, style.customFontPath, style.customFontName, style.weight, style.uppercase, tlWords]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- загрузка ---
+  useEffect(() => {
+    let alive = true
+    window.api.openProject(p.projectId).then(
+      (r) => {
+        if (!alive) return
+        dispatch({ type: 'reset', words: r.project })
+        setMissing(new Set(r.missing))
+        setLoaded(true)
+        if (r.missing.length) p.onError(`Не найдено файлов: ${r.missing.length}. Они отмечены в «Медиа»`)
+      },
+      (e: unknown) => {
+        p.onError(clean(e))
+        p.onClose()
+      }
+    )
+    return () => {
+      alive = false
+    }
+  }, [p.projectId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- автосохранение ---
+  const firstSave = useRef(true)
+  useEffect(() => {
+    if (!loaded) return
+    if (firstSave.current) {
+      firstSave.current = false
+      return
+    }
+    const h = setTimeout(() => {
+      window.api.writeProject(project).then(
+        () => setSaveError(null),
+        (e: unknown) => setSaveError(clean(e))
+      )
+    }, 600)
+    return () => clearTimeout(h)
+  }, [project, loaded])
+
+  // --- подготовка файлов: миниатюры, волна, копия для просмотра ---
+  useEffect(() => {
+    for (const m of project.media) {
+      if (prepared.current.has(m.id) || missing.has(m.path)) continue
+      prepared.current.add(m.id)
+      if (m.hasVideo) void window.api.thumbnail(m.path, m.duration).then((t) => setThumbs((x) => ({ ...x, [m.id]: t })), () => {})
+      if (m.hasAudio) void window.api.peaks(m.path).then((pk) => setPeaks((x) => ({ ...x, [m.id]: pk })), () => {})
+      if (m.needsPreview) {
+        setPreviewing((x) => ({ ...x, [m.id]: 0 }))
+        void window.api.preparePreview(m.path).then(
+          (path) => {
+            setPreviews((x) => ({ ...x, [m.id]: path }))
+            setPreviewing((x) => {
+              const n = { ...x }
+              delete n[m.id]
+              return n
+            })
+          },
+          (e: unknown) => p.onError(`Копия для просмотра «${m.name}»: ${clean(e)}`)
+        )
+      }
+    }
+  }, [project.media, missing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const offProg = window.api.onProgress(setProgress)
+    const offPrev = window.api.onPreviewProgress((e) => {
+      const m = projectRef.current.media.find((x) => x.path === e.mediaPath)
+      if (m) setPreviewing((x) => (m.id in x ? { ...x, [m.id]: e.value } : x))
+    })
+    return () => {
+      offProg()
+      offPrev()
+    }
+  }, [])
+
+  // --- добавление файлов ---
+  const addFiles = useCallback(
+    (infos: MediaInfo[]) => {
+      if (infos.length === 0) return
+      let next = projectRef.current
+      const wasEmpty = next.items.length === 0
+      const ids: string[] = []
+      for (const info of infos) {
+        const r = addMedia(next, toRef(info))
+        next = r.p
+        ids.push(r.id)
+      }
+      // пустой таймлайн — сразу кладём видео друг за другом (как удобно в начале работы)
+      if (wasEmpty) {
+        for (const id of ids) {
+          const m = next.media.find((x) => x.id === id)
+          if (m?.hasVideo) next = insertMedia(next, id, projectDuration(next)).p
+        }
+      }
+      commit(next)
+    },
+    [commit]
+  )
+  useEffect(() => {
+    const off = window.api.onMediaDropped((r) => {
+      if (r.errors.length) p.onError(r.errors.join('; '))
+      addFiles(r.infos)
+    })
+    return off
+  }, [addFiles]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const importFiles = async (): Promise<void> => {
+    try {
+      addFiles(await window.api.importMedia())
+    } catch (e) {
+      p.onError(clean(e))
+    }
+  }
+
+  // --- часы воспроизведения ---
+  const clock = useRef({ t0: 0, p0: 0 })
+  useEffect(() => {
+    if (!playing) return
+    clock.current = { t0: time, p0: performance.now() }
+    let raf = 0
+    const tick = (): void => {
+      const t = clock.current.t0 + (performance.now() - clock.current.p0) / 1000
+      const end = projectDuration(projectRef.current)
+      if (stopAtRef.current !== null && t >= stopAtRef.current) {
+        stopAtRef.current = null
+        setTime(t)
+        setPlaying(false)
+        return
+      }
+      if (t >= end) {
+        setTime(end)
+        setPlaying(false)
+        return
+      }
+      setTime(t)
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [playing]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const seek = useCallback((t: number) => {
+    stopAtRef.current = null
+    const c = Math.max(0, Math.min(t, projectDuration(projectRef.current)))
+    clock.current = { t0: c, p0: performance.now() }
+    setTime(c)
+  }, [])
+  // перетаскивание по полосе: на время — пауза, после отпускания играем дальше, если играло
+  const master = useMasterVolume()
+  const scrubResume = useRef(false)
+  const scrubStart = useCallback(() => {
+    scrubResume.current = playing
+    if (playing) setPlaying(false)
+  }, [playing])
+  const scrubEnd = useCallback(() => {
+    if (!scrubResume.current) return
+    scrubResume.current = false
+    setPlaying(true)
+  }, [])
+  const togglePlay = useCallback(() => {
+    stopAtRef.current = null
+    if (duration <= 0) return
+    if (!playing && time >= duration - 0.01) seek(0)
+    setPlaying((v) => !v)
+  }, [playing, time, duration, seek])
+
+  // --- правки ---
+  const split = useCallback(() => {
+    commit(splitAt(projectRef.current, time, selected.length ? selected : undefined))
+  }, [commit, time, selected])
+  const del = useCallback(
+    (ripple = false) => {
+      if (selected.length === 0) return
+      commit(deleteItems(projectRef.current, selected, ripple))
+      setSelected([])
+    },
+    [commit, selected]
+  )
+  // метка на курсоре: на выделенной дорожке, иначе на дорожке выделенного куска, иначе на самой нижней видеодорожке
+  const addMarkerHere = useCallback(() => {
+    const pr = projectRef.current
+    const track =
+      selectedTrack && pr.tracks.some((t) => t.id === selectedTrack)
+        ? selectedTrack
+        : (pr.items.find((i) => selected.includes(i.id))?.trackId ?? videoTracks(pr).at(-1)?.id)
+    if (!track) return
+    const r = addMarker(pr, track, time, 0, '')
+    if (!r.id) return
+    commit(r.p)
+    setMarkerPopId(r.id)
+  }, [commit, selectedTrack, selected, time])
+  const undo = (): void => dispatch({ type: 'undo' })
+  const redo = (): void => dispatch({ type: 'redo' })
+
+  // отменой можно вернуть состояние без выделенного куска — чистим выделение
+  useEffect(() => {
+    setSelected((s) => (s.every((id) => project.items.some((i) => i.id === id)) ? s : s.filter((id) => project.items.some((i) => i.id === id))))
+  }, [project.items])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = e.target as HTMLElement | null
+      if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes((el as HTMLInputElement).type)))) return
+      if (exportOpen || p.blocked) return
+      if (e.code === 'Escape' && markerPopId) {
+        setMarkerPopId(null)
+        return
+      }
+      const ctrl = e.ctrlKey || e.metaKey
+      const frame = 1 / (project.fps || 30)
+      if (ctrl && e.code === 'KeyS') {
+        e.preventDefault()
+        void (e.shiftKey ? cmds.saveToFile() : cmds.save())
+        return
+      }
+      if (ctrl && e.code === 'KeyI') {
+        e.preventDefault()
+        cmds.addMedia()
+        return
+      }
+      if (ctrl && e.code === 'KeyE') {
+        e.preventDefault()
+        cmds.exportVideo()
+        return
+      }
+      if (ctrl && e.code === 'KeyW') {
+        e.preventDefault()
+        void cmds.close()
+        return
+      }
+      if (ctrl && e.code === 'KeyA') {
+        e.preventDefault()
+        cmds.selectAll()
+        return
+      }
+      if (!ctrl && e.shiftKey && e.code === 'KeyZ') {
+        e.preventDefault()
+        cmds.fit()
+        return
+      }
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+      } else if (ctrl && e.code === 'KeyZ') {
+        e.preventDefault()
+        if (e.shiftKey) redo()
+        else undo()
+      } else if (ctrl && e.code === 'KeyY') {
+        e.preventDefault()
+        redo()
+      } else if (!ctrl && e.code === 'KeyS') {
+        e.preventDefault()
+        split()
+      } else if (!ctrl && e.code === 'KeyM') {
+        e.preventDefault()
+        addMarkerHere()
+      } else if (e.code === 'Delete' || e.code === 'Backspace') {
+        e.preventDefault()
+        del(e.shiftKey)
+      } else if (e.code === 'Escape') {
+        if (markerPopId) setMarkerPopId(null)
+        else setSelected([])
+      } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        e.preventDefault()
+        const d = (e.shiftKey ? 1 : frame) * (e.code === 'ArrowLeft' ? -1 : 1)
+        seek(time + d)
+      } else if (e.code === 'Home') seek(0)
+      else if (e.code === 'End') seek(duration)
+      else if (ctrl && (e.code === 'Equal' || e.code === 'NumpadAdd')) {
+        e.preventDefault()
+        setZoomTick((z) => ({ n: z.n + 1, factor: 1.5 }))
+      } else if (ctrl && (e.code === 'Minus' || e.code === 'NumpadSubtract')) {
+        e.preventDefault()
+        setZoomTick((z) => ({ n: z.n + 1, factor: 1 / 1.5 }))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  // --- субтитры ---
+  const subtitles = async (): Promise<void> => {
+    if (asrBusy) return
+    const pr = projectRef.current
+    const targets = subsTargets(pr, selected)
+    if (targets.length === 0) {
+      p.onError('Нет видео или звука со звуковой дорожкой: положи файл на таймлайн')
+      return
+    }
+    const modelId = loadModelId()
+    try {
+      const m = (await window.api.listModels()).find((x) => x.id === modelId)
+      if (m && !m.installed) {
+        p.onError(`Модель «${m.title}» не скачана. Скачай её в настройках («Распознавание речи»)`)
+        p.onOpenSettings('asr')
+        return
+      }
+    } catch {
+      /* без проверки — пусть распознавание само скажет, что не так */
+    }
+    const jobs = neededRanges(pr, targets)
+    setAsrBusy(true)
+    setProgress(null)
+    p.onError(null)
+    try {
+      const results: Array<{ mediaId: string; from: number; to: number; words: import('../../../shared/types').Word[] }> = []
+      for (let k = 0; k < jobs.length; k++) {
+        const j = jobs[k]
+        const m = mediaOf(pr, j.mediaId)
+        if (!m) continue
+        const label = jobs.length > 1 ? `Субтитры ${k + 1} из ${jobs.length}` : 'Субтитры'
+        results.push({ ...j, words: await window.api.transcribeRange(m.path, modelId, j.from, j.to, label) })
+      }
+      if (!mounted.current) return
+      // применяем к актуальному проекту: за время распознавания его могли править
+      let next = projectRef.current
+      for (const r of results) next = applyRecognized(next, r.mediaId, r.from, r.to, r.words)
+      next = addSubtitles(next, targets.map((i) => i.id))
+      commit(next)
+      // выделяем созданные куски субтитров: справа сразу панель слов и стиля
+      setSelected(next.items.filter((i) => i.kind === 'subs' && i.link && targets.some((t) => t.id === i.link)).map((i) => i.id))
+      setSubsSel(false)
+      setSubsTab('words')
+      setWordSel(-1)
+      flash(jobs.length === 0 ? 'Слова уже были распознаны — субтитры включены' : `Субтитры готовы: ${results.reduce((n, r) => n + r.words.length, 0)} слов`)
+    } catch (e) {
+      if (mounted.current) p.onError(clean(e))
+    } finally {
+      if (mounted.current) {
+        setAsrBusy(false)
+        setProgress(null)
+      }
+    }
+  }
+
+  const indexOfWord = (w: TlWord): number => tlWords.findIndex((x) => x.itemId === w.itemId && x.idx === w.idx)
+  const onWordClick = (w: TlWord): void => {
+    stopAtRef.current = null
+    setPlaying(false)
+    setSelected([w.itemId])
+    setSubsSel(true)
+    setSubsTab('words')
+    setWordSel(indexOfWord(w))
+    setEditWord(w)
+  }
+  const onWordPick = (w: TlWord): void => {
+    setSubsSel(true)
+    setSubsTab('words')
+    setWordSel(indexOfWord(w))
+    seek(w.start)
+  }
+  const wordAt = (i: number): TlWord | undefined => tlWords[i]
+  const applyWord = (next: Project | null, key?: string): void => {
+    if (next) commit(next, key)
+  }
+  const editText = (i: number, text: string): void => {
+    const w = wordAt(i)
+    if (w) applyWord(editTlText(projectRef.current, w, text))
+  }
+  const editTime = (i: number, patch: { start?: number; end?: number }, key: string): void => {
+    const w = wordAt(i)
+    if (w) applyWord(setTlWordTiming(projectRef.current, w, patch), key)
+  }
+  const mergeWord = (i: number): void => {
+    const w = wordAt(i)
+    if (w) applyWord(mergeTlWord(projectRef.current, w))
+  }
+  const deleteWord = (i: number): void => {
+    const w = wordAt(i)
+    if (!w) return
+    applyWord(deleteTlWord(projectRef.current, w))
+    setWordSel(-1)
+  }
+  const playWord = (i: number): void => {
+    const w = wordAt(i)
+    if (!w) return
+    clock.current = { t0: Math.max(0, w.start - 0.15), p0: performance.now() }
+    setTime(clock.current.t0)
+    stopAtRef.current = w.end + 0.1
+    setPlaying(true)
+  }
+  const commitEdit = (text: string, move: -1 | 0 | 1): void => {
+    const w = editWord
+    if (!w) return
+    const idx = indexOfWord(w)
+    const next = editTlText(projectRef.current, w, text)
+    if (next) commit(next)
+    if (move === 0 || idx < 0) {
+      setEditWord(null)
+      return
+    }
+    const list = next ? timelineWordRefs(next) : tlWords
+    const deleted = !!next && list.length < tlWords.length
+    const target = deleted ? (move === 1 ? idx : idx - 1) : idx + move
+    if (target < 0 || target >= list.length) {
+      setEditWord(null)
+      return
+    }
+    seek(list[target].start + 0.03)
+    setWordSel(target)
+    setEditWord(list[target])
+  }
+  const patchStyle = (patch: Partial<SubtitleStyle>): void => commit({ ...projectRef.current, style: { ...style, ...patch } }, 'style')
+  const selectItems = useCallback((ids: string[]) => {
+    setSelected(ids)
+    if (ids.length > 0) setSubsSel(false)
+  }, [])
+
+  const usedIds = useMemo(() => new Set(project.items.map((i) => i.mediaId)), [project.items])
+  /** Двойной щелчок в «Медиа»: в конец самой нижней видеодорожки (звук — в конец первой звуковой). */
+  const appendToLowest = useCallback(
+    (id: string) => {
+      const pr = projectRef.current
+      const m = pr.media.find((x) => x.id === id)
+      const lane = m?.hasVideo ? videoTracks(pr).at(-1) : pr.tracks.find((t) => t.kind === 'audio')
+      const lastItem = lane ? itemsOn(pr, lane.id).at(-1) : undefined
+      commit(insertMedia(pr, id, lastItem ? itemEnd(lastItem) : 0, lane?.id).p)
+    },
+    [commit]
+  )
+  const onDropMedia = useCallback((id: string, trackId: string | null, at: number) => commit(insertMedia(projectRef.current, id, at, trackId ?? undefined).p), [commit])
+  const addTrack = (kind: 'video' | 'audio'): void => commit(addTrackOf(projectRef.current, kind).p)
+  const onRemoveMedia = useCallback((id: string) => commit(removeMedia(projectRef.current, id)), [commit])
+
+  const back = async (): Promise<void> => {
+    setPlaying(false)
+    try {
+      await window.api.writeProject(projectRef.current)
+    } catch (e) {
+      if (!window.confirm(`Не удалось сохранить: ${clean(e)}. Всё равно выйти?`)) return
+    }
+    p.onClose()
+  }
+
+  const saveNow = async (): Promise<boolean> => {
+    try {
+      await window.api.writeProject(projectRef.current)
+      setSaveError(null)
+      return true
+    } catch (e) {
+      setSaveError(clean(e))
+      return false
+    }
+  }
+  const flash = (t: string): void => {
+    setSavedNote(t)
+    setTimeout(() => setSavedNote((x) => (x === t ? null : x)), 2500)
+  }
+  const cmds: EditorCommands = {
+    save: async () => {
+      if (await saveNow()) flash('Сохранено')
+    },
+    saveToFile: async () => {
+      if (!(await saveNow())) return
+      try {
+        const f = await window.api.exportProjectFile(projectRef.current.id)
+        if (f) flash(`Проект сохранён в файл ${f.split(/[\\/]/).pop()}`)
+      } catch (e) {
+        p.onError(clean(e))
+      }
+    },
+    addMedia: () => void importFiles(),
+    exportVideo: () => duration > 0 && setExportOpen(true),
+    close: back,
+    undo,
+    redo,
+    split,
+    del: () => del(false),
+    delRipple: () => del(true),
+    addMarker: addMarkerHere,
+    selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
+    deselect: () => setSelected([]),
+    zoomIn: () => setZoomTick((z) => ({ n: z.n + 1, factor: 1.5 })),
+    zoomOut: () => setZoomTick((z) => ({ n: z.n + 1, factor: 1 / 1.5 })),
+    fit: () => setFitTick((n) => n + 1),
+    home: () => seek(0),
+    end: () => seek(duration)
+  }
+  p.commands.current = cmds
+
+  const asrLabel = asrBusy ? `${progress?.label ?? 'Субтитры: готовлю'}${progress?.stage === 'asr' ? ` — ${Math.round(progress.value * 100)}%` : ''}` : null
+  const status = saveError ? `Не сохранено: ${saveError}` : asrLabel ?? (exporting && progress ? progress.label : savedNote)
+  const stateKey = [project.name, hist.past.length > 0, hist.future.length > 0, selected.length > 0, project.items.length > 0, duration, status, !!saveError].join('|')
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  useEffect(() => {
+    p.onState({
+      name: project.name,
+      canUndo: hist.past.length > 0,
+      canRedo: hist.future.length > 0,
+      hasSel: selected.length > 0,
+      hasItems: project.items.length > 0,
+      duration,
+      status,
+      statusErr: !!saveError
+    })
+  }, [stateKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!loaded) return <main className="editor loading">Открываю проект…</main>
+
+  return (
+    <main
+      className={`editor${resizing ? ' resizing' : ''}`}
+      style={{ '--mw': `${layout.mw}px`, '--iw': `${layout.iw}px`, '--th': `${layout.th}px` } as React.CSSProperties}
+    >
+      {splitter('mw', 'sv1')}
+      {splitter('iw', 'sv2')}
+      {splitter('th', 'sh')}
+
+      <MediaPanel
+        media={project.media}
+        thumbs={thumbs}
+        missing={missing}
+        previewing={previewing}
+        usedIds={usedIds}
+        onImport={() => void importFiles()}
+        onAppend={appendToLowest}
+        onRemove={onRemoveMedia}
+      />
+
+      <section className="ed-center">
+        <Player
+          project={project}
+          time={time}
+          playing={playing}
+          previews={previews}
+          fontTick={fontTick}
+          layers={layers}
+          masterVolume={master.level}
+          editWord={editWord}
+          onWordClick={onWordClick}
+          onEditCommit={commitEdit}
+          onEditCancel={() => setEditWord(null)}
+        />
+        <Transport
+          time={time}
+          duration={duration}
+          playing={playing}
+          onTogglePlay={togglePlay}
+          onSeek={seek}
+          onScrubStart={scrubStart}
+          onScrubEnd={scrubEnd}
+          level={master.level}
+          volume={master.volume}
+          muted={master.muted}
+          onVolume={master.setVolume}
+          onToggleMute={master.toggleMute}
+          info={`${project.canvas ? `${project.canvas.w}×${project.canvas.h}` : 'кадр — по первому видео'} · ${project.fps} fps`}
+        />
+      </section>
+
+      {(subsSel || subsSelected) && tlWords.length > 0 ? (
+        <SubsPanel
+          words={tlWords}
+          time={time}
+          style={style}
+          selected={wordSel}
+          tab={subsTab}
+          onTab={setSubsTab}
+          onPick={(i) => {
+            setWordSel(i)
+            const w = tlWords[i]
+            if (w) seek(w.start)
+          }}
+          onText={editText}
+          onTime={editTime}
+          onMerge={mergeWord}
+          onDelete={deleteWord}
+          onPlay={playWord}
+          onStyle={patchStyle}
+          onStyleReset={() => commit({ ...projectRef.current, style: null }, 'style')}
+        />
+      ) : (
+        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} />
+      )}
+
+      <section className="ed-timeline">
+        <div className="tl-tools">
+          <button className="btn icon ghost" onClick={undo} disabled={hist.past.length === 0} title="Отменить (Ctrl+Z)" aria-label="Отменить">
+            <Icon d={I.undo} />
+          </button>
+          <button className="btn icon ghost" onClick={redo} disabled={hist.future.length === 0} title="Повторить (Ctrl+Shift+Z)" aria-label="Повторить">
+            <Icon d={I.redo} />
+          </button>
+          <span className="tl-sep" />
+          <button className="btn ghost" onClick={split} disabled={project.items.length === 0} title="Разрезать по курсору (S)">
+            <Icon d={I.split} /> Разрезать
+          </button>
+          <button className="btn ghost" onClick={() => del(false)} disabled={selected.length === 0} title="Удалить выделенное, дыра остаётся (Delete). Shift+Delete — удалить и закрыть дыру">
+            <Icon d={I.del} /> Удалить
+          </button>
+          <span className="tl-sep" />
+          <button className="btn ghost" onClick={() => addTrack('video')} title="Добавить видеодорожку (самый верхний слой)">
+            <Icon d={I.plus} /> Видео
+          </button>
+          <button className="btn ghost" onClick={() => addTrack('audio')} title="Добавить звуковую дорожку">
+            <Icon d={I.plus} /> Звук
+          </button>
+          <span className="tl-sep" />
+          <button
+            className="btn"
+            onClick={() => void subtitles()}
+            disabled={asrBusy || project.items.length === 0}
+            title="Распознать речь выделенного видео (без выделения — видео на самой нижней дорожке) и положить субтитры отдельным куском"
+          >
+            {asrBusy ? 'Распознаю…' : 'Субтитры'}
+          </button>
+          <button className="btn" disabled title="Этап после субтитров: ИИ найдёт моменты в выделенном видео">
+            Нарезка
+          </button>
+          <span className="spacer" />
+          <button className="btn icon ghost" onClick={() => setZoomTick((z) => ({ n: z.n + 1, factor: 1 / 1.5 }))} title="Отдалить (Ctrl+−)" aria-label="Отдалить">
+            <Icon d={I.minus} />
+          </button>
+          <button className="btn icon ghost" onClick={() => setFitTick((n) => n + 1)} title="Показать весь таймлайн" aria-label="Показать всё">
+            <Icon d={I.fit} />
+          </button>
+          <button className="btn icon ghost" onClick={() => setZoomTick((z) => ({ n: z.n + 1, factor: 1.5 }))} title="Приблизить (Ctrl+=)" aria-label="Приблизить">
+            <Icon d={I.plus} />
+          </button>
+        </div>
+        <Tracks
+          project={project}
+          time={time}
+          playing={playing}
+          selected={selected}
+          selectedTrack={selectedTrack}
+          peaks={peaks}
+          words={tlWords}
+          selectedWord={selectedWordRef}
+          onSeek={seek}
+          onSelect={selectItems}
+          onSelectTrack={setSelectedTrack}
+          onCommit={commit}
+          onDropMedia={onDropMedia}
+          onWordPick={onWordPick}
+          markerPopId={markerPopId}
+          onMarkerPop={setMarkerPopId}
+          fitTick={fitTick}
+          zoomTick={zoomTick}
+        />
+      </section>
+
+      {exportOpen && <ExportDialog project={project} progress={progress} onClose={() => setExportOpen(false)} onBusy={setExporting} />}
+    </main>
+  )
+}

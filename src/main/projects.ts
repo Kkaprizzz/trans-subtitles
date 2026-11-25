@@ -1,11 +1,12 @@
 /**
- * Автосохранение правок слов: userData/projects/<sha1(путь|размер|mtime)>.json.
+ * Автосохранение правок слов и рамок «Нарезки»: userData/projects/<sha1(путь|размер|mtime)>.json.
  * Ключ включает размер и время изменения, поэтому подменённый файл с тем же именем не получит чужие правки.
  */
 import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { sanitizeClips, type CutClip } from '../shared/cut'
 import type { SavedProject, Word } from '../shared/types'
 
 const dir = (): string => join(app.getPath('userData'), 'projects')
@@ -36,20 +37,22 @@ function validWords(raw: unknown): Word[] | null {
 
 export async function loadProject(mediaPath: string): Promise<SavedProject | null> {
   try {
-    const j = JSON.parse(await readFile(await fileFor(mediaPath), 'utf8')) as { words?: unknown; savedAt?: unknown }
-    const words = validWords(j.words)
-    if (!words || words.length === 0) return null
-    return { words, savedAt: typeof j.savedAt === 'string' ? j.savedAt : '' }
+    const j = JSON.parse(await readFile(await fileFor(mediaPath), 'utf8')) as { words?: unknown; clips?: unknown; savedAt?: unknown }
+    const words = validWords(j.words ?? []) ?? []
+    const clips = sanitizeClips(j.clips)
+    if (words.length === 0 && clips.length === 0) return null
+    return { words, clips, savedAt: typeof j.savedAt === 'string' ? j.savedAt : '' }
   } catch {
     return null
   }
 }
 
-export async function saveProject(mediaPath: string, words: Word[]): Promise<void> {
+export async function saveProject(mediaPath: string, words: Word[], clips: CutClip[] = []): Promise<void> {
   if (!validWords(words)) throw new Error('Некорректные слова для сохранения')
+  const safeClips = sanitizeClips(clips)
   const file = await fileFor(mediaPath)
   await mkdir(dir(), { recursive: true })
   const tmp = `${file}.tmp`
-  await writeFile(tmp, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), words }))
+  await writeFile(tmp, JSON.stringify({ version: 2, savedAt: new Date().toISOString(), words, clips: safeClips }))
   await rename(tmp, file)
 }

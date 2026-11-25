@@ -1,23 +1,35 @@
 /* Токены — см. DESIGN.md */
 :root {
-  --bg: #d9d6cf;
-  --panel: #ece9e4;
-  --panel-sunk: #e1ded6;
-  --ink: #1b1b19;
-  --ink-2: #5a5851;
-  --ink-3: #8a877e;
-  --line: #b8b4a9;
-  --accent: #c2410c;
-  --accent-ink: #ffffff;
-  --ok: #2f6b3a;
-  --err: #a12622;
-  --stage: #111111;
+  color-scheme: dark;
+  --bg: #0e0e10;
+  --panel: #1c1c1f;
+  --panel-2: #27272b;
+  --panel-3: #323237;
+  --panel-sunk: #151517;
+  --ink: #ededf0;
+  --ink-2: #a3a3ab;
+  --ink-3: #6b6b73;
+  --line: #2a2a2f;
+  --line-2: #38383e;
+  --accent: #1fc8d6;
+  --accent-2: #19b2bf;
+  --accent-ink: #041a1d;
+  --accent-soft: rgba(31, 200, 214, 0.16);
+  --ok: #4fc08d;
+  --err: #f06a5f;
+  --stage: #0a0a0b;
+  --c-video: #24464f;
+  --c-audio: #1f4a3d;
+  --c-subs: #5e4521;
+  --c-clip: #45335f;
 
-  --radius: 2px;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
   --ease: cubic-bezier(0.22, 0.8, 0.2, 1);
   --t-fast: 150ms;
 
-  --font-ui: 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --font-ui: 'Commissioner Variable', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 }
 
@@ -82,47 +94,63 @@ body {
 
 .btn,
 select {
-  height: 28px;
+  height: 30px;
   padding: 0 12px;
   font: 500 13px var(--font-ui);
   color: var(--ink);
-  background: var(--panel-sunk);
-  border: 1px solid var(--line);
+  background: var(--panel-2);
+  border: 1px solid transparent;
   border-radius: var(--radius);
+}
+select {
+  padding-right: 28px;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-2) 50%), linear-gradient(135deg, var(--ink-2) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 13px, calc(100% - 10px) 13px;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+select:hover:not(:disabled) {
+  background-color: var(--panel-3);
 }
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  transition: background-color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+  transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
 }
 .btn:hover:not(:disabled) {
-  background: #d6d3ca;
-  border-color: var(--ink-3);
+  background: var(--panel-3);
 }
 .btn.primary {
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--accent-ink);
+  font-weight: 600;
 }
 .btn.primary:hover:not(:disabled) {
-  background: #a93a0a;
-  border-color: #a93a0a;
+  background: var(--accent-2);
 }
 .btn.icon {
-  width: 32px;
+  width: 30px;
   padding: 0;
   justify-content: center;
 }
 .btn:disabled,
 select:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: default;
 }
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 1px var(--accent) inset;
 }
 
 /* Прогресс */
@@ -554,22 +582,27 @@ select:disabled {
   position: absolute;
   z-index: 5;
   display: grid;
-  gap: 4px;
-  width: 220px;
-  padding: 8px;
-  background: var(--panel);
-  border: 1px solid var(--ink);
-  border-radius: var(--radius);
+  gap: 6px;
+  width: 230px;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
   user-select: text;
 }
 .edit-pop input {
-  height: 30px;
-  padding: 0 8px;
+  height: 32px;
+  padding: 0 10px;
   font: 500 15px var(--font-ui);
   color: var(--ink);
-  background: #fff;
-  border: 1px solid var(--line);
+  background: var(--panel-sunk);
+  border: 1px solid transparent;
   border-radius: var(--radius);
+}
+.edit-pop input:focus {
+  outline: 0;
+  border-color: var(--accent);
 }
 .edit-pop .hint {
   font-size: 11px;
@@ -626,4 +659,270 @@ select:disabled {
   font-size: 15px;
   font-weight: 600;
   color: var(--ink);
+}
+
+/* ===== Режимы и «Нарезка» ===== */
+.workspace[hidden] {
+  display: none;
+}
+
+/* Переключатель режимов: текстовые кнопки, активная подчёркнута акцентом */
+.modes {
+  display: flex;
+  align-self: stretch;
+  margin-right: 4px;
+}
+.modes button {
+  padding: 0 10px;
+  font: 500 13px var(--font-ui);
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
+}
+.modes button:hover:not(:disabled) {
+  color: var(--ink);
+}
+.modes button.on {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.modes button:disabled {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+/* Сцена: кадр холста (9:16 и др.) по центру */
+.cut-frame {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+  container-type: size;
+}
+.cut-frame[hidden] {
+  display: none;
+}
+.cut-frame .cut-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.stage .cut-frame video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.cut-captions {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Таймлайн */
+.timeline {
+  position: relative;
+  flex: 0 0 196px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  user-select: none;
+  touch-action: none;
+}
+.tl-canvas {
+  position: absolute;
+  inset: 0;
+}
+.tl-clip {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  min-width: 2px;
+  background: var(--panel-sunk);
+  border: 1px solid var(--ink-2);
+  border-radius: var(--radius);
+  cursor: grab;
+  overflow: hidden;
+}
+.tl-clip:active {
+  cursor: grabbing;
+}
+.tl-clip.sel {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tl-clip.dim {
+  opacity: 0.45;
+}
+.tl-clip.off {
+  border-style: dashed;
+}
+.tl-clip.ghost {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: transparent;
+  pointer-events: none;
+}
+.tl-label {
+  flex: 1;
+  min-width: 0;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.tl-label .mono {
+  color: var(--ink-2);
+}
+.tl-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+}
+.tl-edge.l {
+  left: 0;
+}
+.tl-edge.r {
+  right: 0;
+}
+.tl-clip.sel .tl-edge {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* Правая панель «Нарезки» */
+.cut-panel {
+  display: flex;
+  flex-direction: column;
+}
+.cut-panel .render-actions .link {
+  margin-left: auto;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-settings {
+  margin: 8px 12px 0;
+}
+.ai-settings .form,
+.ai-settings .render-actions {
+  padding-left: 0;
+  padding-right: 0;
+}
+.clip-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  max-height: 40vh;
+}
+.clip-row {
+  display: grid;
+  grid-template-columns: auto 22px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--panel-sunk);
+  cursor: pointer;
+}
+.clip-row:hover {
+  background: var(--panel-sunk);
+}
+.clip-row.sel {
+  background: var(--panel-sunk);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.clip-row.off .clip-title {
+  color: var(--ink-3);
+}
+.clip-title {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.clip-card {
+  margin: 8px 12px 12px;
+}
+.clip-card input[type='text'],
+.clip-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: 13px var(--font-ui);
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 5px 7px;
+  resize: vertical;
+}
+.clip-card .clip-name {
+  font-weight: 600;
+}
+.clip-card .row {
+  grid-template-columns: 96px 1fr;
+}
+.clip-card .render-actions,
+.clip-card .hint {
+  padding-left: 0;
+  padding-right: 0;
+  margin-left: 0;
+  margin-right: 0;
+}
+.hint.warn {
+  color: var(--err);
+}
+.row input[type='text'],
+.row input[type='password'] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 8px;
+  font: 400 13px var(--font-ui);
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.row input.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }

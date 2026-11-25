@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { basename } from 'node:path'
 import type { MediaInfo } from '../shared/types'
 import { FFMPEG, FFPROBE } from './paths'
+import { hasAlphaPixFmt } from '../shared/formats'
 import { needsPreview } from './preview'
 
 function collect(cmd: string, args: string[]): Promise<string> {
@@ -25,6 +26,7 @@ interface ProbeStream {
   width?: number
   height?: number
   r_frame_rate?: string
+  pix_fmt?: string
   disposition?: { attached_pic?: number }
 }
 
@@ -55,6 +57,7 @@ export async function probeMedia(file: string): Promise<MediaInfo> {
     hasAudio,
     videoCodec: video?.codec_name,
     needsPreview: !!video && needsPreview(video.codec_name, j.format?.format_name),
+    hasAlpha: hasAlphaPixFmt(video?.pix_fmt),
     width: video?.width,
     height: video?.height,
     fps
@@ -66,13 +69,16 @@ export function extractAudio(
   file: string,
   outWav: string,
   duration: number,
-  onProgress: (v: number) => void
+  onProgress: (v: number) => void,
+  /** только отрезок файла: секунды начала и длина */
+  range?: { start: number; length: number }
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const p = spawn(
       FFMPEG,
       [
         '-hide_banner', '-loglevel', 'error', '-y',
+        ...(range ? ['-ss', range.start.toFixed(3), '-t', range.length.toFixed(3)] : []),
         '-i', file,
         '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
         '-progress', 'pipe:1', '-nostats',

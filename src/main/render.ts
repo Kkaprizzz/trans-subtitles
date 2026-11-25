@@ -12,8 +12,8 @@ import { spawn } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { once } from 'node:events'
 import { join } from 'node:path'
-import { buildPhrases, captionAt, frameKey } from '../shared/timeline'
-import type { ProgressEvent, RenderFormat, RenderRequest, RenderResult } from '../shared/types'
+import { buildPhrases, captionAt, frameKey, type SubtitleStyle } from '../shared/timeline'
+import type { ProgressEvent, RenderFormat, RenderRequest, RenderResult, Word } from '../shared/types'
 import { FFMPEG } from './paths'
 
 export interface CancelToken {
@@ -51,6 +51,59 @@ async function loadRenderPage(w: BrowserWindow): Promise<void> {
 }
 
 const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
+
+export interface CaptionFrames {
+  /** BGRA premultiplied, W×H; одинаковые кадры не перерисовываются, отдаётся тот же буфер */
+  frame(t: number): Promise<Buffer>
+  /** сколько кадров реально нарисовано */
+  readonly drawn: number
+}
+
+/**
+ * Готовит страницу подписей в offscreen-окне и отдаёт кадры по времени.
+ * Окно одно на приложение, поэтому одновременно работает только один такой генератор.
+ */
+export async function openCaptionFrames(
+  words: Word[],
+  style: SubtitleStyle,
+  W: number,
+  H: number,
+  background: string | null
+): Promise<CaptionFrames> {
+  const w = getWindow()
+  const wc = w.webContents
+  const dbg = wc.debugger
+  await loadRenderPage(w)
+  await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false })
+  const bg = background ? { ...hexToRgb(background), a: 1 } : { r: 0, g: 0, b: 0, a: 0 }
+  await dbg.sendCommand('Emulation.setDefaultBackgroundColorOverride', { color: bg })
+  await wc.executeJavaScript(`window.__init(${JSON.stringify({ words, style, background })})`)
+
+  const phrases = buildPhrases(words, style)
+  let prevKey: string | null = null
+  let buf: Buffer | null = null
+  let drawn = 0
+  return {
+    get drawn() {
+      return drawn
+    },
+    async frame(t: number): Promise<Buffer> {
+      const key = frameKey(captionAt(words, phrases, style, t))
+      if (key !== prevKey || !buf) {
+        await wc.executeJavaScript(`window.__frame(${t})`)
+        const img = await wc.capturePage()
+        const size = img.getSize()
+        if (size.width !== W || size.height !== H) {
+          throw new Error(`Chromium отдал кадр ${size.width}×${size.height} вместо ${W}×${H}`)
+        }
+        buf = img.toBitmap()
+        prevKey = key
+        drawn++
+      }
+      return buf
+    }
+  }
+}
 
 const CRF: Record<RenderRequest['quality'], number> = { high: 14, medium: 18, small: 23 }
 
@@ -104,17 +157,7 @@ export async function renderOverlay(
   const green = req.format === 'h264-green'
   const started = Date.now()
 
-  const w = getWindow()
-  const wc = w.webContents
-  const dbg = wc.debugger
-
-  await loadRenderPage(w)
-  await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false })
-  const bg = green ? { ...hexToRgb(req.greenColor), a: 1 } : { r: 0, g: 0, b: 0, a: 0 }
-  await dbg.sendCommand('Emulation.setDefaultBackgroundColorOverride', { color: bg })
-  await wc.executeJavaScript(
-    `window.__init(${JSON.stringify({ words: req.words, style: req.style, background: green ? req.greenColor : null })})`
-  )
+  const frames = await openCaptionFrames(req.words, req.style, W, H, green ? req.greenColor : null)
 
   // Звук исходника кладём в тот же файл; видеодорожку исходника не берём (map только 0:v и 1:a).
   const audioInputArgs = req.withAudio ? ['-i', req.sourcePath as string] : []
@@ -151,29 +194,11 @@ export async function renderOverlay(
   const fail = (): Error =>
     new Error(`ffmpeg: ${ffErr.trim().split('\n').pop() || (stdinError as Error | null)?.message || 'неизвестная ошибка'}`)
 
-  const phrases = buildPhrases(req.words, req.style)
-  let prevKey: string | null = null
-  let buf: Buffer | null = null
-  let drawn = 0
-
   try {
     for (let i = 0; i < total; i++) {
       if (cancel.cancelled) throw new Error('Отменено')
       if (stdinError) throw fail()
-
-      const t = i / fps
-      const key = frameKey(captionAt(req.words, phrases, req.style, t))
-      if (key !== prevKey || !buf) {
-        await wc.executeJavaScript(`window.__frame(${t})`)
-        const img = await wc.capturePage()
-        const size = img.getSize()
-        if (size.width !== W || size.height !== H) {
-          throw new Error(`Chromium отдал кадр ${size.width}×${size.height} вместо ${W}×${H}`)
-        }
-        buf = img.toBitmap()
-        prevKey = key
-        drawn++
-      }
+      const buf = await frames.frame(i / fps)
       if (!ff.stdin.write(buf)) await Promise.race([once(ff.stdin, 'drain'), spawnFailed])
 
       if (i % 20 === 0 || i === total - 1) {
@@ -196,7 +221,7 @@ export async function renderOverlay(
     path: outputPath,
     seconds: (Date.now() - started) / 1000,
     frames: total,
-    drawnFrames: drawn,
+    drawnFrames: frames.drawn,
     bytes: (await stat(outputPath)).size
   }
 }

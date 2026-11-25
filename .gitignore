@@ -6,3 +6,12 @@ release/
 models/
 bin/
 resources/whisper/
+
+# секреты и тестовые медиа (репозиторий публичный)
+.env
+.env.*
+*.mp4
+*.mov
+*.webm
+*.mkv
+clips-preview/

@@ -1,4 +1,3 @@
-import '@fontsource-variable/ibm-plex-sans/wght.css'
 import '@fontsource/ibm-plex-mono/400.css'
 import './fonts'
 import './styles.css'

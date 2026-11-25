@@ -1,783 +1,281 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
-import * as E from '../../shared/edit'
-import { EMPTY_HIST, histReducer } from '../../shared/history'
-import { fontFamilyOf } from '../../shared/fonts'
-import {
-  buildPhrases,
-  captionAt,
-  DEFAULT_STYLE,
-  findActive,
-  normalizeStyle,
-  type SubtitleStyle
-} from '../../shared/timeline'
-import type { MediaInfo, ModelId, ModelStatus, ProgressEvent, UpdateEvent, Word } from '../../shared/types'
-import { createCaptionView, setupStage, type CaptionView } from './caption'
-import { loadCustomFont } from './customFont'
+/**
+ * Оболочка приложения: верхняя строка (меню, название, «Экспорт»), под ней стартовый экран или монтажный стол.
+ * Здесь же окна настроек и справки, общие сочетания клавиш, заставка, ошибки и автообновление.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ProgressEvent, UpdateEvent } from '../../shared/types'
+import './editor/editor.css'
+import Editor, { type EditorCommands, type EditorState } from './editor/Editor'
+import { AboutDialog, HotkeysDialog } from './editor/InfoDialogs'
+import MenuBar, { type Menu } from './editor/MenuBar'
+import SettingsDialog, { type SettingsSection } from './editor/SettingsDialog'
+import StartScreen from './editor/StartScreen'
 import { hideSplash, splashStep } from './splash'
-import EditPop from './EditPop'
-import { fmtTime, plural } from './format'
-import RenderPanel from './RenderPanel'
-import { loadSettings, resolveSize, STORAGE_KEY as RENDER_KEY, type Settings as RenderSettings } from './renderSettings'
-import StylePanel from './StylePanel'
-import WordEditor from './WordEditor'
-import WordList from './WordList'
 
-type Busy = null | 'download' | 'transcribe' | 'render'
-type Tab = 'words' | 'style' | 'render'
-type ViewMode = 'video' | 'render'
-
-const STYLE_KEY = 'subtitle-style-v1'
-const MODEL_KEY = 'model-v1'
-
-function loadStyle(): SubtitleStyle {
-  try {
-    const raw = localStorage.getItem(STYLE_KEY)
-    if (raw) return normalizeStyle(JSON.parse(raw) as Partial<SubtitleStyle>)
-  } catch {
-    /* localStorage может быть недоступен — берём умолчания */
-  }
-  return DEFAULT_STYLE
-}
-
-function Icon({ d }: { d: string }): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
-      <path d={d} />
-    </svg>
-  )
-}
-const ICON_PLAY = 'M8 5l11 7-11 7z'
-const ICON_PAUSE = 'M8 5v14M16 5v14'
-const ICON_OPEN = 'M3 7h6l2 2h10v10H3z'
-const ICON_UNDO = 'M8 6L3 11l5 5M4 11h10a5 5 0 010 10h-3'
-const ICON_REDO = 'M16 6l5 5-5 5M20 11H10a5 5 0 000 10h3'
-
-/** Поле, в котором печатают: там работает обычная отмена ввода, глобальную не трогаем. */
-function isTyping(el: EventTarget | null): boolean {
-  if (!(el instanceof HTMLElement)) return false
-  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true
-  if (el.tagName !== 'INPUT') return false
-  return !['range', 'checkbox', 'radio', 'color', 'button'].includes((el as HTMLInputElement).type)
-}
+type Dialog = null | { kind: 'settings'; section: SettingsSection } | { kind: 'hotkeys' } | { kind: 'about' }
+const clean = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
 
 export default function App(): React.JSX.Element {
-  const [media, setMedia] = useState<MediaInfo | null>(null)
-  const [models, setModels] = useState<ModelStatus[]>([])
-  const [modelId, setModelId] = useState<ModelId>(() => {
-    try {
-      const saved = localStorage.getItem(MODEL_KEY)
-      if (saved === 'gigaam-v3' || saved === 'whisper-small' || saved === 'whisper-turbo') return saved
-    } catch {
-      /* без localStorage берём умолчание */
-    }
-    return 'gigaam-v3'
-  })
-  const [hist, dispatch] = useReducer(histReducer, EMPTY_HIST)
-  const rawWords = hist.present
-  const [selected, setSelected] = useState(-1)
-  const [edit, setEdit] = useState<{ idx: number } | null>(null)
-  const [editPos, setEditPos] = useState<{ x: number; y: number } | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  /** что играет окно: сам файл или его копия для превью; null — копия ещё готовится */
-  const [playPath, setPlayPath] = useState<string | null>(null)
-  const [preview, setPreview] = useState<{ value: number; error?: string } | null>(null)
-  const [dragging, setDragging] = useState(false)
-  const mediaPathRef = useRef<string | null>(null)
-  const busyRef = useRef<Busy>(null)
-  const [update, setUpdate] = useState<UpdateEvent | null>(null)
-  const [shiftMs, setShiftMs] = useState(0)
-  const [busy, setBusy] = useState<Busy>(null)
-  const [progress, setProgress] = useState<ProgressEvent | null>(null)
+  const [projectId, setProjectId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [time, setTime] = useState(0)
-  const [playing, setPlaying] = useState(false)
-  const [box, setBox] = useState({ w: 0, h: 0 })
-  const [tab, setTab] = useState<Tab>('words')
-  const [style, setStyle] = useState<SubtitleStyle>(loadStyle)
-  const [fontTick, setFontTick] = useState(0)
-  const [rs, setRs] = useState<RenderSettings>(loadSettings)
-  const [viewMode, setViewMode] = useState<ViewMode>('video')
-
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const stageRef = useRef<HTMLDivElement>(null)
-  const frameRef = useRef<HTMLDivElement>(null)
-  const viewRef = useRef<CaptionView | null>(null)
-  const stopAtRef = useRef<number | null>(null)
-  const openEditRef = useRef<(idx: number) => void>(() => {})
-
-  const model = models.find((m) => m.id === modelId)
-
-  // Слова со сдвигом: он действует и на превью, и на рендер.
-  const words = useMemo<Word[]>(
-    () =>
-      shiftMs === 0
-        ? rawWords
-        : rawWords.map((w) => ({ ...w, start: Math.max(0, w.start + shiftMs / 1000), end: Math.max(0, w.end + shiftMs / 1000) })),
-    [rawWords, shiftMs]
-  )
-
-  const refreshModels = useCallback(async () => setModels(await window.api.listModels()), [])
-
-  /** Новый файл: чистим состояние и поднимаем сохранённые правки, если они есть. */
-  /** Окно не покажет картинку этого файла — делаем H.264-копию (или берём из кэша). */
-  const startPreview = useCallback((info: MediaInfo) => {
-    if (mediaPathRef.current !== info.path) return
-    setPlayPath(null)
-    setPreview({ value: 0 })
-    window.api.preparePreview(info.path).then(
-      (p) => {
-        if (mediaPathRef.current !== info.path) return
-        setPlayPath(p)
-        setPreview(null)
-      },
-      (e: unknown) => {
-        if (mediaPathRef.current !== info.path) return
-        setPreview({ value: 0, error: e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e) })
-      }
-    )
-  }, [])
-
-  const afterOpen = useCallback(async (info: MediaInfo) => {
-    mediaPathRef.current = info.path
-    setMedia(info)
-    setPreview(null)
-    if (info.needsPreview) startPreview(info)
-    else setPlayPath(info.path)
-    dispatch({ type: 'reset', words: [] })
-    setSelected(-1)
-    setEdit(null)
-    setTime(0)
-    setPlaying(false)
-    setNotice(null)
-    const saved = await window.api.loadProject(info.path)
-    if (saved) {
-      dispatch({ type: 'reset', words: saved.words })
-      const when = saved.savedAt ? new Date(saved.savedAt).toLocaleString('ru-RU') : ''
-      setNotice(`Восстановлены сохранённые слова${when ? ` (${when})` : ''}. «Распознать» заменит их новым распознаванием`)
-    }
-  }, [startPreview])
+  const [update, setUpdate] = useState<UpdateEvent | null>(null)
+  const [dialog, setDialog] = useState<Dialog>(null)
+  const [ed, setEd] = useState<EditorState | null>(null)
+  const [progress, setProgress] = useState<ProgressEvent | null>(null)
+  const [listTick, setListTick] = useState(0)
+  const cmds = useRef<EditorCommands | null>(null)
+  const [maxed, setMaxed] = useState(true)
 
   useEffect(() => {
-    splashStep('Проверяю модели', 0.45)
-    const models = refreshModels()
-    const initial = window.api.devInitialMedia().then(async (m) => {
+    splashStep('Загружаю проекты', 0.6)
+    // Для автотестов: TS_OPEN=<файл> — сразу проект с этим файлом на таймлайне.
+    const dev = window.api.devInitialMedia().then(async (m) => {
       if (!m) return
-      splashStep('Открываю файл', 0.75)
-      await afterOpen(m)
+      const pr = await window.api.createProject(`Тест · ${m.name}`)
+      await window.api.writeProject({
+        ...pr,
+        canvas: m.width && m.height ? { w: Math.floor(m.width / 2) * 2, h: Math.floor(m.height / 2) * 2 } : null,
+        fps: m.fps && m.fps >= 1 ? m.fps : 30,
+        media: [{ id: 'mdev', path: m.path, name: m.name, duration: m.duration, hasVideo: m.hasVideo, hasAudio: m.hasAudio, width: m.width, height: m.height, fps: m.fps, videoCodec: m.videoCodec, needsPreview: m.needsPreview }],
+        items: [{ id: 'idev', kind: 'media', mediaId: 'mdev', trackId: pr.tracks.filter((t) => t.kind === 'video').at(-1)!.id, start: 0, in: 0, out: m.duration, volume: 1, link: null }]
+      })
+      setProjectId(pr.id)
     })
-    void Promise.allSettled([models, initial]).then(() => hideSplash())
-    const offProgress = window.api.onProgress(setProgress)
-    const offUpdate = window.api.onUpdate(setUpdate)
-    const offPreview = window.api.onPreviewProgress((e) => {
-      if (e.mediaPath === mediaPathRef.current) setPreview((p) => (p && !p.error ? { value: e.value } : p))
-    })
-    const offDrop = window.api.onMediaDropped((r) => {
-      setDragging(false)
-      if (busyRef.current !== null) {
-        setNotice('Сейчас идёт работа — дождись окончания и перетащи файл ещё раз')
-        return
-      }
-      if (r.error) setError(r.error)
-      else if (r.info) {
-        setError(null)
-        void afterOpen(r.info)
-      }
-    })
+    void Promise.allSettled([dev, window.api.listProjects()]).then(() => hideSplash())
+    void window.api.winIsMax().then(setMaxed, () => {})
+    const offWin = window.api.onWinState((st) => setMaxed(st.maximized))
+    const offUpd = window.api.onUpdate(setUpdate)
+    const offProg = window.api.onProgress(setProgress)
     return () => {
-      offProgress()
-      offUpdate()
-      offPreview()
-      offDrop()
-    }
-  }, [refreshModels, afterOpen])
-
-  useEffect(() => {
-    busyRef.current = busy
-  }, [busy])
-
-  // Подсказка при перетаскивании файла: считаем вход/выход, потому что dragleave приходит и от дочерних элементов
-  useEffect(() => {
-    let depth = 0
-    const hasFiles = (e: DragEvent): boolean => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files')
-    const enter = (e: DragEvent): void => {
-      if (!hasFiles(e)) return
-      depth++
-      setDragging(true)
-    }
-    const leave = (e: DragEvent): void => {
-      if (!hasFiles(e)) return
-      depth = Math.max(0, depth - 1)
-      if (depth === 0) setDragging(false)
-    }
-    const drop = (): void => {
-      depth = 0
-      setDragging(false)
-    }
-    window.addEventListener('dragenter', enter)
-    window.addEventListener('dragleave', leave)
-    window.addEventListener('drop', drop)
-    return () => {
-      window.removeEventListener('dragenter', enter)
-      window.removeEventListener('dragleave', leave)
-      window.removeEventListener('drop', drop)
+      offWin()
+      offUpd()
+      offProg()
     }
   }, [])
 
-  // Автосохранение правок: через 0.6 с после последнего изменения.
   useEffect(() => {
-    if (!media || rawWords.length === 0) return
-    const h = setTimeout(() => {
-      void window.api.saveProject(media.path, rawWords).catch(() => {})
-    }, 600)
+    if (!error) return
+    const h = setTimeout(() => setError(null), 8000)
     return () => clearTimeout(h)
-  }, [media, rawWords])
+  }, [error])
 
-  // Размер сцены нужен, чтобы наложить подпись ровно на видимый кадр.
-  useEffect(() => {
-    const el = stageRef.current
-    if (!el) return
-    const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }))
-    ro.observe(el)
-    setBox({ w: el.clientWidth, h: el.clientHeight })
-    return () => ro.disconnect()
+  const onError = useCallback((msg: string | null) => setError(msg), [])
+  const inEditor = projectId !== null && ed !== null
+
+  // --- команды уровня приложения ---
+  const newProject = useCallback(async () => {
+    try {
+      if (cmds.current && projectId) await cmds.current.save()
+      const pr = await window.api.createProject(
+        `Проект ${new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+      )
+      setEd(null)
+      setProjectId(pr.id)
+    } catch (e) {
+      setError(clean(e))
+    }
+  }, [projectId])
+  const openList = useCallback(async () => {
+    if (cmds.current && projectId) await cmds.current.close()
+    else setListTick((n) => n + 1)
+  }, [projectId])
+  const importProject = useCallback(async () => {
+    try {
+      const pr = await window.api.importProjectFile()
+      if (!pr) return
+      if (cmds.current && projectId) await cmds.current.save()
+      setEd(null)
+      setProjectId(pr.id)
+    } catch (e) {
+      setError(clean(e))
+    }
+  }, [projectId])
+  const quit = useCallback(async () => {
+    if (cmds.current && projectId) await cmds.current.save()
+    void window.api.quit()
+  }, [projectId])
+  const closeEditor = useCallback(() => {
+    cmds.current = null
+    setEd(null)
+    setProjectId(null)
+    setListTick((n) => n + 1)
   }, [])
 
-  // Плавное время: timeupdate приходит ~4 раза в секунду, для слов этого мало.
-  useEffect(() => {
-    if (!playing) return
-    let raf = 0
-    const tick = (): void => {
-      const v = videoRef.current
-      if (v) {
-        setTime(v.currentTime)
-        if (stopAtRef.current !== null && v.currentTime >= stopAtRef.current) {
-          stopAtRef.current = null
-          v.pause()
-        }
-      }
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [playing])
-
-  const togglePlay = useCallback(() => {
-    const v = videoRef.current
-    if (!v || !media) return
-    stopAtRef.current = null
-    if (v.paused) void v.play()
-    else v.pause()
-  }, [media])
-
+  // Ctrl+N / Ctrl+O / Ctrl+Q работают везде; остальные сочетания — в редакторе
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      const tag = (e.target as HTMLElement | null)?.tagName
-      if (e.code === 'Space' && tag !== 'SELECT' && tag !== 'BUTTON' && tag !== 'INPUT') {
+      if (!(e.ctrlKey || e.metaKey) || dialog) return
+      if (e.code === 'KeyN') {
         e.preventDefault()
-        togglePlay()
-      } else if ((e.ctrlKey || e.metaKey) && !isTyping(e.target)) {
-        if (e.code === 'KeyZ') {
-          e.preventDefault()
-          dispatch({ type: e.shiftKey ? 'redo' : 'undo' })
-        } else if (e.code === 'KeyY') {
-          e.preventDefault()
-          dispatch({ type: 'redo' })
-        }
+        void newProject()
+      } else if (e.code === 'KeyO') {
+        e.preventDefault()
+        void openList()
+      } else if (e.code === 'KeyQ') {
+        e.preventDefault()
+        void quit()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [togglePlay])
+  }, [dialog, newProject, openList, quit])
 
-  // Подпись в превью рисует тот же код, что и рендер (caption.ts).
-  const out = useMemo(() => resolveSize(rs, media), [rs, media])
-  const showRender = viewMode === 'render'
-  const sourceAspect = media?.hasVideo && media.width && media.height ? media.width / media.height : 16 / 9
-  const aspect = showRender ? out.w / out.h : sourceAspect
-  const frameBg =
-    !showRender ? undefined : rs.format === 'h264-green' ? rs.green : 'repeating-conic-gradient(#cfccc4 0 25%, #e6e3dc 0 50%) 0 0 / 24px 24px'
-  const frameW = Math.min(box.w, box.h * aspect)
-  const frameH = frameW / aspect
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STYLE_KEY, JSON.stringify(style))
-    } catch {
-      /* не критично */
+  const c = (): EditorCommands | null => cmds.current
+  const settings = (section: SettingsSection) => () => setDialog({ kind: 'settings', section })
+  const menus: Menu[] = [
+    {
+      label: 'Файл',
+      items: [
+        { label: 'Новый проект', shortcut: 'Ctrl+N', action: () => void newProject() },
+        { label: 'Открыть…', shortcut: 'Ctrl+O', action: () => void openList() },
+        'sep',
+        { label: 'Сохранить', shortcut: 'Ctrl+S', disabled: !inEditor, action: () => void c()?.save() },
+        { label: 'Сохранить проект в файл…', shortcut: 'Ctrl+Shift+S', disabled: !inEditor, action: () => void c()?.saveToFile() },
+        { label: 'Импорт проекта из файла…', action: () => void importProject() },
+        'sep',
+        { label: 'Добавить медиа…', shortcut: 'Ctrl+I', disabled: !inEditor, action: () => c()?.addMedia() },
+        { label: 'Экспорт видео…', shortcut: 'Ctrl+E', disabled: !inEditor || !ed?.hasItems, action: () => c()?.exportVideo() },
+        'sep',
+        { label: 'Закрыть проект', shortcut: 'Ctrl+W', disabled: !inEditor, action: () => void c()?.close() },
+        { label: 'Выход', shortcut: 'Ctrl+Q', action: () => void quit() }
+      ]
+    },
+    {
+      label: 'Правка',
+      items: [
+        { label: 'Отменить', shortcut: 'Ctrl+Z', disabled: !ed?.canUndo, action: () => c()?.undo() },
+        { label: 'Повторить', shortcut: 'Ctrl+Shift+Z', disabled: !ed?.canRedo, action: () => c()?.redo() },
+        'sep',
+        { label: 'Разрезать', shortcut: 'S', disabled: !ed?.hasItems, action: () => c()?.split() },
+        { label: 'Удалить', shortcut: 'Delete', disabled: !ed?.hasSel, action: () => c()?.del() },
+        { label: 'Удалить и закрыть дыру', shortcut: 'Shift+Delete', disabled: !ed?.hasSel, action: () => c()?.delRipple() },
+        'sep',
+        { label: 'Поставить метку', shortcut: 'M', disabled: !inEditor, action: () => c()?.addMarker() },
+        'sep',
+        { label: 'Выделить всё', shortcut: 'Ctrl+A', disabled: !ed?.hasItems, action: () => c()?.selectAll() },
+        { label: 'Снять выделение', shortcut: 'Esc', disabled: !ed?.hasSel, action: () => c()?.deselect() }
+      ]
+    },
+    {
+      label: 'Вид',
+      items: [
+        { label: 'Приблизить', shortcut: 'Ctrl+=', disabled: !inEditor, action: () => c()?.zoomIn() },
+        { label: 'Отдалить', shortcut: 'Ctrl+−', disabled: !inEditor, action: () => c()?.zoomOut() },
+        { label: 'Весь таймлайн', shortcut: 'Shift+Z', disabled: !inEditor, action: () => c()?.fit() },
+        'sep',
+        { label: 'В начало', shortcut: 'Home', disabled: !inEditor, action: () => c()?.home() },
+        { label: 'В конец', shortcut: 'End', disabled: !inEditor, action: () => c()?.end() }
+      ]
+    },
+    {
+      label: 'Настройки',
+      items: [
+        { label: 'Распознавание речи…', action: settings('asr') },
+        { label: 'ИИ для «Нарезки»…', action: settings('ai') },
+        'sep',
+        { label: 'Экспорт…', action: settings('export') },
+        { label: 'Новый проект…', action: settings('project') },
+        'sep',
+        { label: 'Кэш…', action: settings('cache') },
+        { label: 'Обновления…', action: settings('updates') }
+      ]
+    },
+    {
+      label: 'Справка',
+      items: [
+        { label: 'Горячие клавиши', action: () => setDialog({ kind: 'hotkeys' }) },
+        { label: 'О программе', action: () => setDialog({ kind: 'about' }) }
+      ]
     }
-  }, [style])
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(RENDER_KEY, JSON.stringify(rs))
-    } catch {
-      /* не критично */
-    }
-  }, [rs])
-
-  const patchRender = useCallback((patch: Partial<RenderSettings>) => setRs((prev) => ({ ...prev, ...patch })), [])
-
-  const patchStyle = useCallback((patch: Partial<SubtitleStyle>) => setStyle((prev) => ({ ...prev, ...patch })), [])
-
-  const phrases = useMemo(() => buildPhrases(words, style), [words, style.mode, style.maxWords, style.pauseBreak]) // eslint-disable-line react-hooks/exhaustive-deps
-  const caption = useMemo(() => captionAt(words, phrases, style, time), [words, phrases, style, time])
-
-  // Шрифт грузится лениво: ждём его и перерисовываем (от него зависит и перенос строк).
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      if (style.font === 'custom' && style.customFontPath) {
-        const ok = (await window.api.allowFont(style.customFontPath)) && (await loadCustomFont(style.customFontPath))
-        if (!ok && !cancelled) setNotice(`Не удалось загрузить шрифт «${style.customFontName || style.customFontPath}»: показываю Montserrat. Выбери файл заново на вкладке «Стиль»`)
-      }
-      const family = fontFamilyOf(style)
-      const sample = [...new Set(words.map((w) => w.text).join(''))].join('') + 'АаЯя'
-      await document.fonts.load(`${style.weight} 40px ${family}`, style.uppercase ? sample + sample.toUpperCase() : sample)
-      if (!cancelled) setFontTick((n) => n + 1)
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [style.font, style.customFontPath, style.customFontName, style.weight, style.uppercase, words]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useLayoutEffect(() => {
-    if (!frameRef.current) return
-    setupStage(frameRef.current)
-    viewRef.current = createCaptionView(frameRef.current)
-    viewRef.current.onWordClick = (idx) => openEditRef.current(idx)
-    return () => {
-      viewRef.current = null
-      if (frameRef.current) frameRef.current.textContent = ''
-    }
-  }, [])
-
-  useLayoutEffect(() => {
-    viewRef.current?.configure(words, phrases, style, fontFamilyOf(style))
-  }, [words, phrases, style, fontTick])
-
-  useLayoutEffect(() => {
-    viewRef.current?.render(caption)
-  }, [caption])
-
-  const shownIdx = caption?.active ?? -1
-  const activeIdx = useMemo(() => findActive(words, time), [words, time])
-
-
-  const seek = (t: number): void => {
-    if (!videoRef.current) return
-    stopAtRef.current = null
-    videoRef.current.currentTime = t
-    setTime(t)
-  }
-
-  // Стабильный обработчик клика по строке: WordList и строки мемоизированы.
-  const pickRowRef = useRef<(i: number) => void>(() => {})
-  pickRowRef.current = (i) => {
-    setSelected(i)
-    if (words[i]) seek(words[i].start)
-  }
-  const pickRow = useCallback((i: number) => pickRowRef.current(i), [])
-
-  // --- правки слов ---
-  const sel = selected >= 0 && selected < words.length ? selected : -1
-
-  const applyEdit = (r: E.EditResult | null, key?: string): void => {
-    if (!r) return
-    dispatch({ type: 'commit', words: r.words, key, now: Date.now() })
-    setSelected(r.focus)
-  }
-
-  /** Время в окне показано со сдвигом, а хранится без него. */
-  const editTime = (idx: number, patch: { start?: number; end?: number }, key: string): void => {
-    if (!media) return
-    const off = shiftMs / 1000
-    const next = E.setTiming(
-      rawWords,
-      idx,
-      {
-        start: patch.start === undefined ? undefined : patch.start - off,
-        end: patch.end === undefined ? undefined : patch.end - off
-      },
-      media.duration
-    )
-    if (next) dispatch({ type: 'commit', words: next, key, now: Date.now() })
-  }
-
-  const nudge = (idx: number, which: 'start' | 'end', dir: 1 | -1): void => {
-    const w = words[idx]
-    if (w) editTime(idx, { [which]: w[which] + dir * E.NUDGE }, `n-${w.id}-${which}`)
-  }
-
-  const playWord = (idx: number): void => {
-    const v = videoRef.current
-    const w = words[idx]
-    if (!v || !w) return
-    v.currentTime = Math.max(0, w.start - 0.15)
-    stopAtRef.current = w.end + 0.1
-    void v.play()
-  }
-
-  const openEdit = (idx: number): void => {
-    if (!words[idx]) return
-    stopAtRef.current = null
-    videoRef.current?.pause()
-    setSelected(idx)
-    setEdit({ idx })
-  }
-  openEditRef.current = openEdit
-
-  const commitEdit = (text: string, move: -1 | 0 | 1): void => {
-    if (!edit) return
-    const idx = edit.idx
-    const r = E.setText(rawWords, idx, text)
-    if (r) applyEdit(r)
-    if (move === 0) {
-      setEdit(null)
-      return
-    }
-    const list = r ? r.words : rawWords
-    const deleted = !!r && r.words.length < rawWords.length
-    const target = deleted ? (move === 1 ? idx : idx - 1) : idx + move
-    if (target < 0 || target >= list.length) {
-      setEdit(null)
-      return
-    }
-    seek(list[target].start + shiftMs / 1000 + 0.03)
-    setSelected(target)
-    setEdit({ idx: target })
-  }
-
-  // Окошко правки встаёт под слово на сцене (или в центр кадра, если слово сейчас не нарисовано).
-  useLayoutEffect(() => {
-    if (!edit || !stageRef.current) {
-      setEditPos(null)
-      return
-    }
-    const stage = stageRef.current.getBoundingClientRect()
-    const r = viewRef.current?.wordRect(edit.idx)
-    const pos = r
-      ? { x: Math.round(r.left + r.width / 2 - stage.left), y: Math.round(r.bottom - stage.top + 10) }
-      : { x: Math.round(stage.width / 2), y: Math.round(stage.height * 0.72) }
-    setEditPos((prev) => (prev && prev.x === pos.x && prev.y === pos.y ? prev : pos))
-  }, [edit, caption, frameW, frameH, fontTick])
-
-  const openFile = async (): Promise<void> => {
-    setError(null)
-    try {
-      const info = await window.api.pickMedia()
-      if (!info) return
-      await afterOpen(info)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  const download = async (): Promise<void> => {
-    setError(null)
-    setBusy('download')
-    setProgress({ stage: 'download', value: 0, label: 'Скачиваю модель' })
-    try {
-      await window.api.downloadModel(modelId)
-      await refreshModels()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-      setProgress(null)
-    }
-  }
-
-  const recognize = async (): Promise<void> => {
-    if (!media) return
-    if (rawWords.length > 0 && !window.confirm('Заменить текущие слова и правки новым распознаванием?')) return
-    setError(null)
-    setNotice(null)
-    setBusy('transcribe')
-    setProgress({ stage: 'audio', value: 0, label: 'Извлекаю звук' })
-    const started = performance.now()
-    try {
-      const result = await window.api.transcribe(media.path, modelId)
-      dispatch({ type: 'reset', words: result })
-      setSelected(-1)
-      const sec = (performance.now() - started) / 1000
-      setProgress({ stage: 'asr', value: 1, label: `Готово за ${sec.toFixed(1)} с` })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-      setProgress(null)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const setRenderBusy = useCallback((v: boolean) => {
-    setBusy(v ? 'render' : null)
-    if (!v) setProgress(null)
-  }, [])
-
-  const mustDownload = !!model && !model.installed
-  const statusText = error
-    ? error
-    : progress
-      ? `${progress.label}${busy && progress.stage !== 'render' ? ` — ${Math.round(progress.value * 100)}%` : ''}`
-      : notice
-        ? notice
-        : media
-        ? `${media.width && media.height ? `${media.width}×${media.height}` : 'аудио'}${media.fps ? ` · ${media.fps.toFixed(0)} fps` : ''}`
-        : 'Файл не выбран'
+  ]
 
   return (
-    <div className="app">
-      {dragging && (
-        <div className="drop-overlay" aria-hidden="true">
-          <span>{busy !== null ? 'Сейчас идёт работа — дождись окончания' : 'Отпусти, чтобы открыть файл'}</span>
-        </div>
-      )}
-      <header className="toolbar">
-        <button className="btn" onClick={() => void openFile()} disabled={busy !== null}>
-          <Icon d={ICON_OPEN} />
-          Открыть файл
-        </button>
-        <span className="filename" title={media?.path}>
-          {media ? media.name : '—'}
+    <div className="app-shell">
+      <header
+        className="app-top"
+        onDoubleClick={(e) => {
+          // двойной щелчок по пустому месту строки — развернуть/вернуть (как у системной рамки)
+          if (e.target === e.currentTarget) void window.api.winToggleMax()
+        }}
+      >
+        <span className="app-logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M5 7h14M5 12h9M5 17h11" />
+          </svg>
         </span>
+        <MenuBar menus={menus} />
+        {inEditor && (
+          <button className="btn ghost small" onClick={() => void c()?.close()} title="К списку проектов (Ctrl+W)">
+            ← Проекты
+          </button>
+        )}
+        <span className="app-title">{inEditor ? ed.name : 'Trans Subtitles'}</span>
         <span className="spacer" />
-        {update?.state === 'ready' && (
-          <button className="btn" onClick={() => void window.api.installUpdate()} title="Перезапустит приложение и поставит новую версию">
-            Обновить до {update.version}
+        {inEditor && ed.status && <span className={`app-status${ed.statusErr ? ' warn' : ' dim'}`}>{ed.status}</span>}
+        {inEditor && (
+          <button className="btn primary" onClick={() => c()?.exportVideo()} disabled={!ed.hasItems} title="Экспорт видео (Ctrl+E)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 15V3M7 8l5-5 5 5M5 14v6h14v-6" />
+            </svg>
+            Экспорт
           </button>
         )}
-        {update?.state === 'downloading' && <span className="dim">Скачиваю обновление {update.version}…</span>}
-        <label className="field">
-          <span>Модель</span>
-          <select
-            value={modelId}
-            onChange={(e) => {
-              const id = e.target.value as ModelId
-              setModelId(id)
-              try {
-                localStorage.setItem(MODEL_KEY, id)
-              } catch {
-                /* не критично */
-              }
-            }}
-            disabled={busy !== null}
-            title={model?.note}
-          >
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.title}
-                {m.recommended ? ' · рекомендуется' : ''}
-                {m.heavy ? ' · тяжело для этого ПК' : ''}
-                {m.installed ? '' : ` — ${m.sizeMB} МБ`}
-              </option>
-            ))}
-          </select>
-        </label>
-        {mustDownload ? (
-          <button className="btn primary" onClick={() => void download()} disabled={busy !== null}>
-            Скачать модель
+        <div className="win-ctrls">
+          <button className="win-btn" onClick={() => void window.api.winMinimize()} title="Свернуть" aria-label="Свернуть">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+              <path d="M6 12h12" />
+            </svg>
           </button>
-        ) : (
+          <button className="win-btn" onClick={() => void window.api.winToggleMax()} title={maxed ? 'Вернуть размер' : 'Развернуть'} aria-label={maxed ? 'Вернуть размер' : 'Развернуть'}>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true">
+              {maxed ? <path d="M8.5 8.5V6h9.5v9.5h-2.5M6 8.5h9.5V18H6z" /> : <path d="M6.5 6.5h11v11h-11z" />}
+            </svg>
+          </button>
           <button
-            className="btn primary"
-            onClick={() => void recognize()}
-            disabled={!media || !media.hasAudio || busy !== null}
-            title={media && !media.hasAudio ? 'В файле нет звуковой дорожки' : undefined}
+            className="win-btn close"
+            onClick={() => void (async () => {
+              if (cmds.current && projectId) await cmds.current.save()
+              void window.api.winClose()
+            })()}
+            title="Закрыть"
+            aria-label="Закрыть"
           >
-            Распознать
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+              <path d="M7 7l10 10M17 7L7 17" />
+            </svg>
           </button>
-        )}
+        </div>
       </header>
 
-      <div className="progress" aria-hidden={busy === null}>
-        <div className="progress-bar" style={{ transform: `scaleX(${busy ? (progress?.value ?? 0) : 0})` }} />
-      </div>
+      {projectId ? (
+        <Editor key={projectId} projectId={projectId} onClose={closeEditor} onError={onError} commands={cmds}
+          onState={setEd}
+          blocked={dialog !== null}
+          onOpenSettings={(section) => setDialog({ kind: 'settings', section })}
+        />
+      ) : (
+        <StartScreen key={listTick} onOpen={(id) => setProjectId(id)} onError={onError} />
+      )}
 
-      <main className="workspace">
-        <section className="stage-col">
-          <div className="stage" ref={stageRef}>
-            {media ? (
-              <video
-                ref={videoRef}
-                src={playPath ? window.api.mediaUrl(playPath) : undefined}
-                onLoadedData={() => {
-                  // запасной путь: формат не распознан заранее, но окно всё равно не смогло показать картинку
-                  const v = videoRef.current
-                  if (v && media.hasVideo && v.videoWidth === 0 && playPath === media.path) startPreview(media)
-                }}
-                onError={() => {
-                  if (playPath === media.path && media.hasVideo) startPreview(media)
-                }}
-                onPlay={() => setPlaying(true)}
-                onPause={() => {
-                  setPlaying(false)
-                  if (videoRef.current) setTime(videoRef.current.currentTime)
-                }}
-                onSeeked={() => videoRef.current && setTime(videoRef.current.currentTime)}
-                onTimeUpdate={() => {
-                  // запасная проверка остановки «Слово ▸»: rAF замедляется, если окно перекрыто
-                  const v = videoRef.current
-                  if (v && stopAtRef.current !== null && v.currentTime >= stopAtRef.current) {
-                    stopAtRef.current = null
-                    v.pause()
-                  }
-                }}
-                onEnded={() => setPlaying(false)}
-                className={!media.hasVideo ? 'audio-only' : showRender ? 'dimmed' : ''}
-              />
-            ) : (
-              <p className="stage-empty">Открой видео или аудио, чтобы начать</p>
-            )}
-            {media && !media.hasVideo && <p className="stage-empty">Только аудио</p>}
-            {media && preview && (
-              <div className="stage-note">
-                {preview.error ? (
-                  <span>{preview.error}</span>
-                ) : (
-                  <>
-                    <span>
-                      Готовлю превью: окно не показывает {media.videoCodec?.toUpperCase() ?? 'этот формат'} — делаю копию для просмотра.
-                      Распознавать можно уже сейчас.
-                    </span>
-                    <span className="mono">{Math.round(preview.value * 100)}%</span>
-                    <span className="note-bar">
-                      <span style={{ transform: `scaleX(${preview.value})` }} />
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-            <div className="caption-frame" ref={frameRef} style={{ width: frameW, height: frameH, background: frameBg }} />
-            {edit && editPos && words[edit.idx] && (
-              <EditPop
-                key={edit.idx}
-                text={words[edit.idx].text}
-                x={editPos.x}
-                y={editPos.y}
-                stageW={box.w}
-                onCommit={commitEdit}
-                onCancel={() => setEdit(null)}
-              />
-            )}
-          </div>
+      {dialog?.kind === 'settings' && <SettingsDialog section={dialog.section} progress={progress} onClose={() => setDialog(null)} />}
+      {dialog?.kind === 'hotkeys' && <HotkeysDialog onClose={() => setDialog(null)} />}
+      {dialog?.kind === 'about' && <AboutDialog onClose={() => setDialog(null)} />}
 
-          <div className="transport">
-            <button className="btn icon" onClick={togglePlay} disabled={!media} aria-label={playing ? 'Пауза' : 'Играть'}>
-              <Icon d={playing ? ICON_PAUSE : ICON_PLAY} />
+      {(error || update) && (
+        <div className="toast-row">
+          {error && (
+            <div className="toast err" role="alert" onClick={() => setError(null)}>
+              {error}
+            </div>
+          )}
+          {update?.state === 'ready' && (
+            <button className="toast" onClick={() => void window.api.installUpdate()} title="Перезапустит приложение и поставит новую версию">
+              Обновить до {update.version}
             </button>
-            <input
-              className="seek"
-              type="range"
-              min={0}
-              max={media?.duration ?? 0}
-              step={0.01}
-              value={Math.min(time, media?.duration ?? 0)}
-              onChange={(e) => seek(Number(e.target.value))}
-              disabled={!media}
-              aria-label="Позиция"
-            />
-            <div className="segmented small" role="radiogroup" aria-label="Что показывать на сцене">
-              <button
-                role="radio"
-                aria-checked={!showRender}
-                className={!showRender ? 'on' : ''}
-                onClick={() => setViewMode('video')}
-                title="Видео исходника с подписями поверх"
-              >
-                Видео
-              </button>
-              <button
-                role="radio"
-                aria-checked={showRender}
-                className={showRender ? 'on' : ''}
-                onClick={() => setViewMode('render')}
-                title={`Кадр так, как попадёт в файл: ${out.w}×${out.h}, ${rs.format === 'h264-green' ? 'зелёный фон' : 'прозрачный фон'}`}
-              >
-                Как в рендере
-              </button>
-            </div>
-            <span className="mono timecode">
-              {fmtTime(time)} / {fmtTime(media?.duration ?? 0)}
-            </span>
-          </div>
-        </section>
-
-        <aside className="side">
-          <div className="tabs" role="tablist">
-            {(
-              [
-                ['words', 'Слова'],
-                ['style', 'Стиль'],
-                ['render', 'Рендер']
-              ] as Array<[Tab, string]>
-            ).map(([id, label]) => (
-              <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>
-                {label}
-              </button>
-            ))}
-          </div>
-
-          <div className="tab-body" hidden={tab !== 'style'}>
-            <StylePanel style={style} onChange={patchStyle} onReset={() => setStyle(DEFAULT_STYLE)} />
-          </div>
-
-          <div className="transcript" hidden={tab !== 'words'}>
-            <div className="panel-title">
-              <span>Расшифровка</span>
-              <span className="title-tools">
-                <button className="btn icon small" onClick={() => dispatch({ type: 'undo' })} disabled={hist.past.length === 0} aria-label="Отменить" title="Отменить (Ctrl+Z)">
-                  <Icon d={ICON_UNDO} />
-                </button>
-                <button className="btn icon small" onClick={() => dispatch({ type: 'redo' })} disabled={hist.future.length === 0} aria-label="Повторить" title="Повторить (Ctrl+Shift+Z)">
-                  <Icon d={ICON_REDO} />
-                </button>
-                <span className="mono dim">
-                  {words.length} {plural(words.length, 'слово', 'слова', 'слов')}
-                </span>
-              </span>
-            </div>
-            <WordList
-              words={words}
-              shownIdx={shownIdx}
-              selected={sel}
-              scrollIdx={activeIdx}
-              emptyText={media ? 'Нажми «Распознать», слова появятся здесь' : 'Пока пусто'}
-              onPick={pickRow}
-            />
-            <WordEditor
-              word={sel >= 0 ? words[sel] : null}
-              canMerge={sel >= 0 && sel < words.length - 1}
-              onText={(text) => applyEdit(E.setText(rawWords, sel, text))}
-              onTime={(patch, key) => editTime(sel, patch, key)}
-              onNudge={(which, dir) => nudge(sel, which, dir)}
-              onMerge={() => applyEdit(E.mergeWithNext(rawWords, sel))}
-              onDelete={() => applyEdit(E.deleteWord(rawWords, sel))}
-              onPlay={() => playWord(sel)}
-            />
-          </div>
-
-          <div className="tab-body" hidden={tab !== 'render'}>
-          <RenderPanel
-            media={media}
-            settings={rs}
-            onSettingsChange={patchRender}
-            words={words}
-            style={style}
-            shiftMs={shiftMs}
-            onShiftChange={setShiftMs}
-            progress={progress}
-            otherBusy={busy !== null && busy !== 'render'}
-            onBusyChange={setRenderBusy}
-            onError={setError}
-          />
-          </div>
-        </aside>
-      </main>
-
-      <footer className={`statusbar${error ? ' error' : ''}`}>
-        <span>{statusText}</span>
-        {media && <span className="mono dim">{fmtTime(media.duration)}</span>}
-      </footer>
+          )}
+          {update?.state === 'downloading' && <div className="toast dim">Скачиваю обновление {update.version}…</div>}
+        </div>
+      )}
     </div>
   )
 }
