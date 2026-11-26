@@ -4,7 +4,8 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { joinSelected } from '../../../shared/mix'
+import { addEffect, insertFreeze, joinSelected } from '../../../shared/mix'
+import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
 import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
 import {
@@ -20,6 +21,7 @@ import {
   insertMedia,
   itemEnd,
   itemsOn,
+  itemTrackKind,
   mediaOf,
   mergeTlWord,
   neededRanges,
@@ -68,6 +70,8 @@ export interface EditorCommands {
   join(): void
   /** прервать идущее распознавание или поиск моментов */
   cancelWork(): void
+  /** разрезать по курсору и вставить стоп-кадр (Shift+S) */
+  freeze(): void
   /** поставить метку на курсоре */
   addMarker(): void
   selectAll(): void
@@ -167,7 +171,8 @@ const I = {
   minus: 'M5 12h14',
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2.2.3-1.3-1.3L17 4.8 14 4l-1 2h-2l-1-2-3 .8.5 2.2-1.3 1.3L5 8l-1 3 2 1v0l-2 1 1 3 2.2-.3 1.3 1.3L7 19.2l3 .8 1-2h2l1 2 3-.8-.5-2.2 1.3-1.3 2.2.3 1-3z',
-  out: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6'
+  out: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6',
+  freeze: 'M4 5h16v14H4zM10 9v6M14 9v6'
 }
 
 export default function Editor(p: Props): React.JSX.Element {
@@ -194,6 +199,7 @@ export default function Editor(p: Props): React.JSX.Element {
   const [asrBusy, setAsrBusy] = useState(false)
   // «Нарезка»: выбранная рамка, фокус на рамке, окошко и ход работы
   const [selectedClip, setSelectedClip] = useState<string | null>(null)
+  const [leftTab, setLeftTab] = useState<'media' | 'fx'>('media')
   const [focusClipId, setFocusClipId] = useState<string | null>(null)
   const [clipsOpen, setClipsOpen] = useState(false)
   const [clipsBusy, setClipsBusy] = useState(false)
@@ -506,6 +512,44 @@ export default function Editor(p: Props): React.JSX.Element {
     commit(r.p)
     setMarkerPopId(r.id)
   }, [commit, selectedTrack, selected, time])
+  // Shift+S: разрезать по курсору и вставить стоп-кадр. Берёт выделенный кусок видео под курсором, иначе кусок на выбранной
+  // дорожке, иначе на самой нижней видеодорожке.
+  const freezeHere = (): void => {
+    const pr = projectRef.current
+    const cand = pr.items.filter(
+      (i) => i.kind === 'media' && itemTrackKind(pr, i) === 'video' && !!mediaOf(pr, i.mediaId)?.hasVideo && time >= i.start - 1e-6 && time <= itemEnd(i) + 1e-6
+    )
+    const order = (i: (typeof cand)[number]): number => pr.tracks.findIndex((t) => t.id === i.trackId)
+    const it = cand.find((i) => selected.includes(i.id)) ?? cand.find((i) => i.trackId === selectedTrack) ?? [...cand].sort((a, b) => order(b) - order(a))[0]
+    if (!it) {
+      p.onError('Поставь курсор на кусок видео, чтобы вставить стоп-кадр')
+      return
+    }
+    const r = insertFreeze(pr, it.id, time)
+    if (r.error) {
+      p.onError(r.error)
+      return
+    }
+    p.onError(null)
+    commit(r.p)
+    setSelected([r.id])
+    setSelectedClip(null)
+  }
+  /** Накладывает эффект на выделенные куски (или на один кусок, если его указали: перетащили карточку). */
+  const applyEffect = (type: EffectType, itemId?: string): void => {
+    const ids = itemId ? [itemId] : selected
+    if (ids.length === 0) {
+      p.onError('Выдели кусок, на который наложить эффект')
+      return
+    }
+    const r = addEffect(projectRef.current, ids, type)
+    if (r.added === 0) {
+      p.onError('Эффект уже наложен или кусок не подходит (звук и субтитры без эффектов)')
+      return
+    }
+    p.onError(null)
+    commit(r.p)
+  }
   // Ctrl+J: соединить выделенные куски обратно; не вышло — говорим почему
   const joinSel = (): void => {
     const r = joinSelected(projectRef.current, selected)
@@ -582,6 +626,9 @@ export default function Editor(p: Props): React.JSX.Element {
       } else if (ctrl && e.code === 'KeyY') {
         e.preventDefault()
         redo()
+      } else if (!ctrl && e.shiftKey && e.code === 'KeyS') {
+        e.preventDefault()
+        freezeHere()
       } else if (!ctrl && e.code === 'KeyS') {
         e.preventDefault()
         split()
@@ -947,6 +994,7 @@ export default function Editor(p: Props): React.JSX.Element {
     delRipple: () => del(true),
     join: joinSel,
     cancelWork,
+    freeze: freezeHere,
     addMarker: addMarkerHere,
     selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
     deselect: () => setSelected([]),
@@ -996,6 +1044,9 @@ export default function Editor(p: Props): React.JSX.Element {
         onImport={() => void importFiles()}
         onAppend={appendToLowest}
         onRemove={onRemoveMedia}
+        tab={leftTab}
+        onTab={setLeftTab}
+        onEffect={(t) => applyEffect(t)}
       />
 
       <section className="ed-center">
@@ -1081,6 +1132,9 @@ export default function Editor(p: Props): React.JSX.Element {
           <button className="btn ghost" onClick={split} disabled={project.items.length === 0} title="Разрезать по курсору (S)">
             <Icon d={I.split} /> Разрезать
           </button>
+          <button className="btn ghost" onClick={freezeHere} disabled={project.items.length === 0} title="Разрезать по курсору и вставить стоп-кадр на 3 с (Shift+S)">
+            <Icon d={I.freeze} /> Стоп-кадр
+          </button>
           <button className="btn ghost" onClick={() => del(false)} disabled={selected.length === 0} title="Удалить выделенное, дыра остаётся (Delete). Shift+Delete — удалить и закрыть дыру">
             <Icon d={I.del} /> Удалить
           </button>
@@ -1139,6 +1193,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onSelectClip={onSelectClip}
           onClipOpen={enterFocus}
           onMessage={(m) => p.onError(m)}
+          onDropEffect={(id, t) => applyEffect(t, id)}
           focus={focusRange}
           fitTick={fitTick}
           zoomTick={zoomTick}

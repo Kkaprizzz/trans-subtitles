@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import { addPoint, cleanPoints, gainAt, gainExpr, gainPeak, mergeGain, movePoint, splitGain } from './audio.ts'
 import { buildExport } from './exportGraph.ts'
 import { tempoFilter } from './exportGraph.ts'
+import { insertFreeze, setFreezeLength, addEffect, patchEffect, removeEffect, canHaveEffects } from './mix.ts'
+import { effectFilters, blurSigma, sameEffects, cleanEffects } from './effects.ts'
 import { cropProject, orderedClips, placement, makeClip, sourceAt } from './cut.ts'
 import { setSpeed, clampSpeed } from './mix.ts'
 import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, itemGainAt, joinItems, joinSelected, joinWithNeighbor, moveGainPoint, neighbors, setBaseVolume } from './mix.ts'
-import { addMarker, addMedia, addSubtitles, applyRecognized, insertMedia, itemDur, itemEnd, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, subtitleLayers, tlToSrc, trimItem, videoTracks } from './project.ts'
+import { projectDuration, addMarker, addMedia, addSubtitles, applyRecognized, insertMedia, itemDur, itemEnd, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, subtitleLayers, tlToSrc, trimItem, videoTracks } from './project.ts'
 
 const V = (path, duration, extra = {}) => ({ path, name: path, duration, hasVideo: true, hasAudio: true, width: 1280, height: 720, fps: 25, needsPreview: false, ...extra })
 const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-3, `${msg}: ${a} != ${b}`)
@@ -227,7 +229,7 @@ for (const it of v5.items) {
   it.volume = 0.5
 }
 const mig = sanitizeProject(v5)
-assert.equal(mig.version, 7)
+assert.equal(mig.version, 8)
 const mv = mig.items.find((i) => i.mediaId === ma)
 assert.deepEqual([mv.audio, mv.volume, mv.gain], [true, 0.5, []], 'звук прикреплён, уровень сохранён')
 assert.equal(mig.items.find((i) => i.mediaId === mus).audio, true)
@@ -359,7 +361,7 @@ void subsOf
   // сохранение и миграция
   const saved = sanitizeProject(JSON.parse(JSON.stringify(at2.p)))
   assert.equal(saved.items.find((i) => i.id === a1.id).speed, 2)
-  assert.equal(saved.version, 7)
+  assert.equal(saved.version, 8)
   const v6 = JSON.parse(JSON.stringify(q))
   v6.version = 6
   for (const it of v6.items) delete it.speed
@@ -369,6 +371,145 @@ void subsOf
   wild.items[1].speed = -3
   assert.deepEqual(sanitizeProject(wild).items.slice(0, 2).map((i) => i.speed), [4, 0.25], 'значения зажаты в 0.25–4')
   void orderedClips
+}
+
+// === стоп-кадр и эффекты ===
+{
+  let q = newProject('Ф')
+  q = addMedia(q, V('/a.mp4', 20)).p
+  q = addMedia(q, { path: '/m.mp3', name: 'm', duration: 30, hasVideo: false, hasAudio: true, needsPreview: false }).p
+  const [qa, qm] = q.media.map((m) => m.id)
+  const a1 = insertMedia(q, qa, 0)
+  q = a1.p
+  const trackV = q.items.find((i) => i.id === a1.id).trackId
+  const tail = insertMedia(q, qa, 20, trackV)
+  q = tail.p
+  q = addMarker(q, trackV, 25, 0, '').p
+  const mus = insertMedia(q, qm, 0)
+  q = mus.p
+  q = applyRecognized(q, qa, 0, 20, [{ id: 0, text: 'раз', start: 8, end: 9 }, { id: 1, text: 'два', start: 12, end: 13 }])
+  q = addSubtitles(q, [a1.id])
+  q = addGainPoint(q, a1.id, 5, 0.4).p
+
+  const r = insertFreeze(q, a1.id, 10)
+  assert.ok(!r.error)
+  const items = r.p.items
+  const fz = items.find((i) => i.id === r.id)
+  assert.deepEqual([fz.kind, fz.start, fz.in, fz.out, fz.audio], ['freeze', 10, 10, 13, false], 'кадр в точке 10 с, длина 3 с, без звука')
+  const halves = items.filter((i) => i.kind === 'media' && i.mediaId === qa).sort((x, y) => x.start - y.start)
+  assert.equal(halves.length, 3, 'левая, правая и хвост')
+  assert.deepEqual([halves[0].start, halves[0].out], [0, 10])
+  assert.deepEqual([halves[1].start, halves[1].in, halves[1].out], [13, 10, 20], 'правая половина сдвинута на 3 с и продолжает с того же места')
+  near(halves[2].start, 23, 'всё правее на дорожке сдвинулось')
+  assert.equal(items.find((i) => i.id === mus.id).start, 0, 'другие дорожки не тронуты')
+  near(r.p.markers[0].t, 28, 'метка дорожки сдвинулась')
+  // звук делится вместе с видео: линия громкости на стыке одна и та же
+  assert.ok(halves[0].audio && halves[1].audio)
+  near(itemGainAt(halves[1], 13), itemGainAt(halves[0], 10), 'громкость на стыке не прыгает')
+  // субтитры порезаны вместе с видео, на стоп-кадре их нет
+  const subs = items.filter((i) => i.kind === 'subs').sort((x, y) => x.start - y.start)
+  assert.equal(subs.length, 2)
+  assert.deepEqual([subs[1].start, subs[1].in], [13, 10], 'правая часть субтитров сдвинулась с видео')
+  assert.deepEqual(subtitleLayers(r.p).flatMap((l) => l.words.map((w) => [w.text, w.start])), [['раз', 8], ['два', 15]], 'слова: до стопкадра на месте, после — сдвинуты на 3 с')
+  assert.equal(projectDuration(r.p) >= 43 - 1e-6, true, 'длина проекта выросла на 3 с')
+  // у самого края: без резки
+  const atStart = insertFreeze(q, a1.id, 0.02)
+  assert.equal(atStart.p.items.find((i) => i.id === atStart.id).start, 0)
+  assert.equal(atStart.p.items.find((i) => i.id === a1.id).start, 3, 'видео сдвинулось на 3 с')
+  assert.equal(atStart.p.items.filter((i) => i.kind === 'media' && i.mediaId === qa).length, 2, 'ничего не разрезано')
+  const atEnd = insertFreeze(q, a1.id, 19.99)
+  const fe = atEnd.p.items.find((i) => i.id === atEnd.id)
+  assert.equal(fe.start, 20)
+  near(fe.in, 19.96, 'последний кадр куска')
+  near(atEnd.p.items.find((i) => i.id === tail.id).start, 23)
+  // отказы
+  assert.match(insertFreeze(q, mus.id, 5).error, /куске видео/, 'у звука стоп-кадра нет')
+  assert.match(insertFreeze(q, a1.id, 25).error, /курсор/)
+  assert.match(insertFreeze(setTrack(q, trackV, { locked: true }), a1.id, 10).error, /закреплена/)
+  // длина стопкадра
+  const longer = setFreezeLength(r.p, r.id, 5)
+  assert.ok(!longer.error)
+  near(longer.p.items.find((i) => i.id === r.id).out, 15, 'out = in + длина')
+  near(longer.p.items.filter((i) => i.kind === 'media' && i.mediaId === qa).sort((x, y) => x.start - y.start)[1].start, 15, 'правая часть сдвинулась ещё на 2 с')
+  const shorter = setFreezeLength(r.p, r.id, 1)
+  near(shorter.p.items.filter((i) => i.kind === 'media' && i.mediaId === qa).sort((x, y) => x.start - y.start)[1].start, 11)
+  near(setFreezeLength(r.p, r.id, 0).p.items.find((i) => i.id === r.id).out - 10, 0.1, 'не короче 0.1 с')
+  assert.match(setFreezeLength(r.p, halves[0].id, 3).error, /не стоп-кадр/)
+  // стоп-кадр режется, двигается; trimItem его не трогает
+  const sf = splitItem(r.p, r.id, 11)
+  const [f1, f2] = [sf.p.items.find((i) => i.id === r.id), sf.p.items.find((i) => i.id === sf.id)]
+  assert.deepEqual([f1.in, f1.out, f2.in, f2.out], [10, 11, 10, 12], 'кадр один, длина делится')
+  assert.equal(trimItem(r.p, r.id, 'end', 12), r.p)
+  // склейка стоп-кадра не берётся
+  assert.match(joinItems(r.p, halves[0].id, r.id).error, /видео и звука|разных/)
+
+  // рамки «Клипы» и экспорт клипов: стоп-кадр внутри рамки — её часть
+  // второй такой же кусок файла (хвост) в расчёт не берём: берём проект без него
+  const clipP = { ...r.p, items: r.p.items.filter((i) => i.id !== tail.id), clips: [makeClip(qa, 5, 15)] }
+  const pc = placement(clipP, clipP.clips[0])
+  near(pc.start, 5)
+  near(pc.end, 18, 'рамка 5–15 с файла вместе со стоп-кадром 3 с')
+  const cpf = cropProject(clipP, pc.start, pc.end)
+  const cfz = cpf.items.find((i) => i.kind === 'freeze')
+  assert.deepEqual([cfz.start, cfz.out - cfz.in], [5, 3])
+
+  // эффекты
+  const e1 = addEffect(r.p, [a1.id, r.id, mus.id], 'blur')
+  assert.equal(e1.added, 2, 'на видео и стоп-кадр; на звук нельзя')
+  assert.equal(e1.p.items.find((i) => i.id === r.id).effects[0].strength, 50)
+  assert.equal(addEffect(e1.p, [a1.id], 'blur').added, 0, 'второй такой же не добавляется')
+  assert.equal(canHaveEffects(r.p, r.p.items.find((i) => i.kind === 'subs')), false)
+  assert.equal(canHaveEffects(r.p, r.p.items.find((i) => i.id === mus.id)), false)
+  const effId = e1.p.items.find((i) => i.id === a1.id).effects[0].id
+  const e2 = patchEffect(e1.p, a1.id, effId, { strength: 80, on: false })
+  assert.deepEqual([e2.items.find((i) => i.id === a1.id).effects[0].strength, e2.items.find((i) => i.id === a1.id).effects[0].on], [80, false])
+  assert.equal(patchEffect(e1.p, a1.id, effId, { strength: 500 }).items.find((i) => i.id === a1.id).effects[0].strength, 100)
+  assert.equal(removeEffect(e2, a1.id, effId).items.find((i) => i.id === a1.id).effects.length, 0)
+  // резка копирует эффекты, склейка не склеивает разные
+  const ef = addEffect(q, [a1.id], 'blur').p
+  const cutE = splitAt(ef, 7)
+  const pe = cutE.items.filter((i) => i.kind === 'media' && i.mediaId === qa && i.start < 20).sort((x, y) => x.start - y.start)
+  assert.ok(pe.every((x) => x.effects.length === 1), 'обе половины с эффектом')
+  assert.ok(!joinItems(cutE, pe[0].id, pe[1].id).error, 'одинаковые эффекты склеиваются')
+  const diff = patchEffect(cutE, pe[1].id, pe[1].effects[0].id, { strength: 10 })
+  assert.match(joinItems(diff, pe[0].id, pe[1].id).error, /эффекты/)
+  assert.equal(sameEffects(pe[0].effects, pe[1].effects), true)
+  // реестр и фильтры
+  near(blurSigma(100, 1080), 43.2)
+  near(blurSigma(50, 1920), 38.4)
+  assert.deepEqual(effectFilters([{ id: 'x', type: 'blur', on: true, strength: 50 }], 1000), ['gblur=sigma=20.00:steps=2'])
+  assert.deepEqual(effectFilters([{ id: 'x', type: 'blur', on: false, strength: 50 }], 1000), [], 'выключенный не применяется')
+  assert.deepEqual(effectFilters([{ id: 'x', type: 'blur', on: true, strength: 0 }], 1000), [])
+  assert.deepEqual(cleanEffects([{ type: 'blur', strength: 999 }, { type: 'wow' }, null]).map((e) => [e.type, e.strength, e.on]), [['blur', 100, true]])
+
+  // граф экспорта: стоп-кадр и эффект
+  const optsF = { W: 1280, H: 720, fps: 25, format: 'h264', quality: 'medium', subLayers: [] }
+  const gf = (pr) => {
+    const c = buildExport(pr, optsF, '/o.mp4')
+    return { g: c.args[c.args.indexOf('-filter_complex') + 1], args: c.args, total: c.total }
+  }
+  const x = gf(e1.p)
+  assert.match(x.g, /trim=end_frame=1,setpts=PTS-STARTPTS,fps=25,loop=loop=74:size=1:start=0,setpts=PTS-STARTPTS\+10\.000\/TB/, 'стоп-кадр 3 с = 75 кадров')
+  assert.match(x.g, /gblur=sigma=14\.40:steps=2/, 'блюр 50% от высоты 720')
+  assert.equal((x.g.match(/\[\d+:a\]/g) ?? []).length, 4, 'звук: левая, правая, хвост и музыка; у стоп-кадра звука нет')
+  const ifz = x.args.findIndex((a, i) => a === '-t' && x.args[i + 1] === '0.5')
+  assert.ok(ifz > 0 && x.args[ifz - 2] === '-ss' && x.args[ifz - 1] === '10.000', 'вход стоп-кадра: -ss 10.000 -t 0.5')
+  assert.match(gf(removeEffect(removeEffect(e1.p, a1.id, effId), r.id, e1.p.items.find((i) => i.id === r.id).effects[0].id)).g, /^((?!gblur).)*$/s, 'без эффектов блюра в графе нет')
+  // кадрирование клипа: стоп-кадр тоже кадрируется
+  const gc = buildExport(cropProject(clipP, 5, 18), { ...optsF, W: 1080, H: 1920, framing: { mediaId: qa, mode: 'crop', offsetX: 0.5 } }, '/o.mp4')
+  assert.match(gc.args[gc.args.indexOf('-filter_complex') + 1], /loop=loop=74:size=1:start=0,setpts=PTS-STARTPTS\+5\.000\/TB\[r\d\];\[r\d\]scale=1080:1920:force_original_aspect_ratio=increase/)
+
+  // сохранение и миграция
+  const saved = sanitizeProject(JSON.parse(JSON.stringify(e1.p)))
+  assert.equal(saved.version, 8)
+  assert.equal(saved.items.find((i) => i.kind === 'freeze').effects[0].type, 'blur')
+  const v7 = JSON.parse(JSON.stringify(q))
+  v7.version = 7
+  for (const it of v7.items) delete it.effects
+  assert.ok(sanitizeProject(v7).items.every((i) => Array.isArray(i.effects) && i.effects.length === 0), 'старые проекты: эффектов нет')
+  const badFz = JSON.parse(JSON.stringify(r.p))
+  badFz.items.find((i) => i.kind === 'freeze').trackId = badFz.tracks.find((t) => t.kind === 'audio').id
+  assert.ok(!sanitizeProject(badFz).items.some((i) => i.kind === 'freeze'), 'стоп-кадр на звуковой дорожке выброшен')
 }
 
 console.log('mix.ts, audio.ts: все проверки прошли')

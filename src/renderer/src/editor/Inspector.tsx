@@ -1,8 +1,9 @@
 /** Инспектор: свойства выделенного куска или, если ничего не выделено, — проекта. */
 import { memo, useState } from 'react'
 import { deleteClip, patchClip, placement } from '../../../shared/cut'
-import { clampSpeed, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
-import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Project } from '../../../shared/project'
+import { EFFECTS } from '../../../shared/effects'
+import { canHaveEffects, clampSpeed, patchEffect, removeEffect, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
+import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
 
@@ -185,6 +186,78 @@ function SpeedRow(p: { project: Project; ids: string[]; onCommit(next: Project, 
   )
 }
 
+const FREEZE_PRESETS = [1, 2, 3, 5, 10]
+
+/** Длительность стоп-кадра: правая часть дорожки сдвигается вместе с ней. */
+function FreezeRow(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element {
+  const len = Math.round((p.item.out - p.item.in) * 100) / 100
+  const [text, setText] = useState(String(len))
+  const [seen, setSeen] = useState(len)
+  if (seen !== len) {
+    setSeen(len)
+    setText(String(len))
+  }
+  const apply = (v: number): void => {
+    const r = setFreezeLength(p.project, p.item.id, v)
+    if (r.error) p.onMessage(r.error)
+    else p.onCommit(r.p)
+  }
+  return (
+    <div className="insp-col">
+      <span>Длительность стоп-кадра, с</span>
+      <div className="speed-row">
+        <input
+          type="text"
+          inputMode="decimal"
+          className="mono"
+          value={text}
+          aria-label="Длительность стоп-кадра, секунды"
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => {
+            const v = Number(text.replace(',', '.'))
+            if (!Number.isFinite(v) || v <= 0) setText(String(len))
+            else if (Math.abs(v - len) > 1e-9) apply(v)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            e.stopPropagation()
+          }}
+        />
+      </div>
+      <div className="speed-presets" role="group" aria-label="Длительность, пресеты">
+        {FREEZE_PRESETS.map((v) => (
+          <button key={v} className={len === v ? 'on' : ''} onClick={() => apply(v)}>
+            {v}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Эффекты куска: сила ползунком, глаз «вкл/выкл», удалить. */
+function EffectsBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+  return (
+    <div className="insp-col">
+      <span>Эффекты</span>
+      {p.item.effects.length === 0 && <span className="dim fx-none">Пока нет: вкладка «Эффекты» слева в панели медиа</span>}
+      {p.item.effects.map((e) => (
+        <div key={e.id} className={`fx-row${e.on ? '' : ' off'}`}>
+          <button className="fx-eye" aria-pressed={!e.on} title={e.on ? 'Выключить эффект' : 'Включить эффект'} onClick={() => p.onCommit(patchEffect(p.project, p.item.id, e.id, { on: !e.on }))}>
+            {e.on ? '●' : '○'}
+          </button>
+          <span className="fx-title">{EFFECTS[e.type].title}</span>
+          <input type="range" min={0} max={100} step={1} value={e.strength} onChange={(ev) => p.onCommit(patchEffect(p.project, p.item.id, e.id, { strength: Number(ev.target.value) }), `fx-${e.id}`)} aria-label={`${EFFECTS[e.type].title}: сила`} />
+          <span className="mono fx-val">{e.strength}</span>
+          <button className="fx-del" title="Убрать эффект" aria-label="Убрать эффект" onClick={() => p.onCommit(removeEffect(p.project, p.item.id, e.id))}>
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function Inspector(p: Props): React.JSX.Element {
   const pr = p.project
   if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
@@ -196,7 +269,7 @@ function Inspector(p: Props): React.JSX.Element {
     return (
       <aside className="inspector">
         <div className="pane-head">
-          <span>Кусок</span>
+          <span>{one.kind === 'freeze' ? 'Стоп-кадр' : 'Кусок'}</span>
         </div>
         <div className="insp-body">
           <p className="insp-title" title={m.path}>
@@ -209,14 +282,14 @@ function Inspector(p: Props): React.JSX.Element {
             </dd>
             <dt>Длина</dt>
             <dd>{itemDur(one).toFixed(2)} с</dd>
-            <dt>Из файла</dt>
-            <dd>
-              {fmtTime(one.in)} – {fmtTime(one.out)}
-            </dd>
+            <dt>{one.kind === 'freeze' ? 'Кадр из файла' : 'Из файла'}</dt>
+            <dd>{one.kind === 'freeze' ? fmtTime(one.in) : `${fmtTime(one.in)} – ${fmtTime(one.out)}`}</dd>
             <dt>Дорожка</dt>
             <dd>{track ? trackName(pr, track.id) : '—'}</dd>
           </dl>
           <SpeedRow project={pr} ids={[one.id]} onCommit={p.onCommit} onMessage={p.onMessage} />
+          {one.kind === 'freeze' && <FreezeRow key={one.id} project={pr} item={one} onCommit={p.onCommit} onMessage={p.onMessage} />}
+          {canHaveEffects(pr, one) && <EffectsBlock project={pr} item={one} onCommit={p.onCommit} />}
           {subsOf(pr, one.id).length > 0 && (
             <div className="insp-link">
               <span className="dim">Субтитры едут вместе с этим видео</span>

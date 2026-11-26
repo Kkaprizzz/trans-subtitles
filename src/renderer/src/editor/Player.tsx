@@ -8,6 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { fontFamilyOf } from '../../../shared/fonts'
 import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
 import { gainAt } from '../../../shared/audio'
+import { blurSigma } from '../../../shared/effects'
 import { activeAt, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
 import { buildPhrases, captionAt, DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import { createCaptionView, setupStage, type CaptionView } from '../caption'
@@ -145,9 +146,10 @@ export default function Player(p: Props): React.JSX.Element {
     if (!frame) return
     const t = p.time
     // куски субтитров — не медиа: для них элементов не заводим
-    const active = activeAt(p.project, t).filter((i) => i.kind === 'media')
+    const isPic = (i: Item): boolean => i.kind === 'media' || i.kind === 'freeze'
+    const active = activeAt(p.project, t).filter(isPic)
     const activeIds = new Set(active.map((i) => i.id))
-    const upcoming = p.playing ? p.project.items.filter((i) => i.kind === 'media' && !activeIds.has(i.id) && i.start > t && i.start - t < PRELOAD) : []
+    const upcoming = p.playing ? p.project.items.filter((i) => isPic(i) && !activeIds.has(i.id) && i.start > t && i.start - t < PRELOAD) : []
     const wanted = new Map<string, Item>([...active, ...upcoming].map((i) => [i.id, i]))
 
     // лишние — убрать
@@ -190,6 +192,9 @@ export default function Player(p: Props): React.JSX.Element {
         const framed = !!cv && it.mediaId === cv.mediaId
         el.style.objectFit = framed && cv.mode === 'crop' ? 'cover' : 'contain'
         el.style.objectPosition = framed && cv.mode === 'crop' ? `${cv.offsetX * 100}% 50%` : '50% 50%'
+        // эффекты куска: блюр в долях высоты кадра — как в экспорте
+        const px = it.effects.reduce((n, e) => (e.on && e.type === 'blur' ? n + blurSigma(e.strength, frameH) : n), 0)
+        el.style.filter = px >= 0.3 ? `blur(${px.toFixed(1)}px)` : ''
       }
       // скорость куска; тон сохраняется (preservesPitch по умолчанию включён)
       if (el.playbackRate !== it.speed) el.playbackRate = it.speed
@@ -204,20 +209,23 @@ export default function Player(p: Props): React.JSX.Element {
         // ниже по списку дорожек — ниже по слоям
         el.style.zIndex = String(layerZ(trackOrder.get(it.trackId) ?? 0))
       }
-      const want = isActive ? sourceTime(it, t) : it.in
+      // стоп-кадр всегда показывает один кадр файла (секунда in) и никогда не играет
+      const freeze = it.kind === 'freeze'
+      const want = freeze ? it.in : isActive ? sourceTime(it, t) : it.in
+      if (freeze) el.muted = true
       if (!src) continue
-      if (isActive && p.playing) {
+      if (isActive && p.playing && !freeze) {
         if (Math.abs(el.currentTime - want) > DRIFT * Math.max(1, it.speed)) el.currentTime = want
         if (el.paused) void el.play().catch(() => {})
       } else {
         if (!el.paused) el.pause()
-        if (Math.abs(el.currentTime - want) > (isActive ? 0.02 : 0.2)) el.currentTime = want
+        if (Math.abs(el.currentTime - want) > (isActive && !freeze ? 0.02 : freeze ? 0.01 : 0.2)) el.currentTime = want
       }
     }
     paintBg()
     const h = setTimeout(paintBg, 90)
     return () => clearTimeout(h)
-  }, [p.time, p.playing, p.project, p.previews, p.masterVolume, trackOrder, muted, hidden, cv?.mode, cv?.offsetX, cv?.mediaId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [p.time, p.playing, p.project, p.previews, p.masterVolume, trackOrder, muted, hidden, frameH, cv?.mode, cv?.offsetX, cv?.mediaId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ушли с проекта — освобождаем все элементы.
   useEffect(() => {

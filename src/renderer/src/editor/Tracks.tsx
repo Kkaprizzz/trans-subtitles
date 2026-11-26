@@ -10,7 +10,8 @@
  */
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { gainAt } from '../../../shared/audio'
-import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, joinWithNeighbor, moveGainPoint, setBaseVolume } from '../../../shared/mix'
+import { EFFECT_MIME, EFFECTS, type EffectType } from '../../../shared/effects'
+import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, insertFreeze, joinWithNeighbor, moveGainPoint, setBaseVolume, setFreezeLength } from '../../../shared/mix'
 import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
   MARKER_COLORS,
@@ -74,6 +75,8 @@ interface Props {
   onClipOpen(id: string): void
   /** сообщение пользователю (почему операция не удалась) */
   onMessage(msg: string): void
+  /** карточку эффекта бросили на кусок */
+  onDropEffect(itemId: string, type: EffectType): void
   /** фокус на рамке: вне неё затемнено, вид приближен */
   focus: { start: number; end: number } | null
   /** внешняя команда «показать всё» — меняется счётчик */
@@ -301,6 +304,7 @@ function Tracks(p: Props): React.JSX.Element {
   const [h, setH] = useState(0)
   const [view, setView] = useState<TimelineView>({ start: 0, pps: 20 })
   const [ghost, setGhost] = useState<{ id: string; trackId: string; start: number; top: number; height: number } | null>(null)
+  const [fxOver, setFxOver] = useState<string | null>(null)
   const [dropAt, setDropAt] = useState<{ x: number; top: number; height: number } | null>(null)
   type Menu =
     | { kind: 'lane'; x: number; y: number; trackId: string; t: number }
@@ -545,6 +549,18 @@ function Tracks(p: Props): React.JSX.Element {
         }
       })
     }
+    // стоп-кадр в точке курсора воспроизведения: видео и звук режутся, между половинами встаёт кадр на 3 с
+    if (it.kind === 'media' && own?.kind === 'video' && media?.hasVideo && p.time >= it.start && p.time <= itemEnd(it)) {
+      out.push({
+        label: 'Стоп-кадр',
+        key: 'Shift+S',
+        run: () => {
+          const r = insertFreeze(pr, it.id, p.time)
+          if (r.error) say(r.error)
+          else p.onCommit(r.p)
+        }
+      })
+    }
     // режет всегда по курсору воспроизведения (как клавиша S), поэтому пункт есть, только когда курсор внутри куска
     if (p.time > it.start + 0.1 && p.time < itemEnd(it) - 0.1) {
       out.push({
@@ -642,6 +658,12 @@ function Tracks(p: Props): React.JSX.Element {
       d.moved = true
       let t = xToTime(x, view)
       if (snapOn) t = snapTo(t, [...snapPoints(d.p0, d.id), p.time], tol)
+      // у стоп-кадра правый край меняет длину, и правая часть дорожки едет вместе с ним
+      const fz = d.p0.items.find((i) => i.id === d.id)
+      if (fz?.kind === 'freeze') {
+        if (d.edge === 'end') p.onCommit(setFreezeLength(d.p0, d.id, t - fz.start).p, `trim-${d.id}-end`)
+        return
+      }
       p.onCommit(trimItem(d.p0, d.id, d.edge, t), `trim-${d.id}-${d.edge}`)
       return
     }
@@ -693,7 +715,21 @@ function Tracks(p: Props): React.JSX.Element {
   }
 
   // --- бросок файла из «Медиа» ---
+  /** Кусок под точкой (для броска эффекта): строка по y, затем кусок по времени; субтитры и звук не берём. */
+  const itemAtPoint = (x: number, y: number): Item | null => {
+    const r = rowAt(y)
+    if (!r || typeof r !== 'object') return null
+    const t = xToTime(x, view)
+    return p.project.items.find((i) => i.trackId === r.track.id && i.kind !== 'subs' && t >= i.start && t <= itemEnd(i)) ?? null
+  }
   const onDragOver = (e: React.DragEvent): void => {
+    if (e.dataTransfer.types.includes(EFFECT_MIME)) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+      const { x, y } = local(e)
+      setFxOver(itemAtPoint(x, y)?.id ?? null)
+      return
+    }
     if (!e.dataTransfer.types.includes(MEDIA_MIME)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -703,6 +739,16 @@ function Tracks(p: Props): React.JSX.Element {
     setDropAt({ x, top: row ? row.top : r === 'above' ? (rows[0]?.top ?? RULER + 8) - 6 : bottom - GAP, height: row ? row.h : 6 })
   }
   const onDrop = (e: React.DragEvent): void => {
+    const fx = e.dataTransfer.getData(EFFECT_MIME)
+    if (fx) {
+      e.preventDefault()
+      const { x, y } = local(e)
+      setFxOver(null)
+      const hit = itemAtPoint(x, y)
+      if (hit) p.onDropEffect(hit.id, fx as EffectType)
+      else p.onMessage('Брось карточку на кусок видео')
+      return
+    }
     const id = e.dataTransfer.getData(MEDIA_MIME)
     setDropAt(null)
     if (!id) return
@@ -733,7 +779,10 @@ function Tracks(p: Props): React.JSX.Element {
   const popRow = popMarker ? rows.find((r) => r.track.id === popMarker.trackId) : undefined
 
   return (
-    <div className="tracks" onDragOver={onDragOver} onDragLeave={() => setDropAt(null)} onDrop={onDrop}>
+    <div className="tracks" onDragOver={onDragOver} onDragLeave={() => {
+        setDropAt(null)
+        setFxOver(null)
+      }} onDrop={onDrop}>
       <div className="tr-heads" style={{ width: HEAD }}>
         <div className="tr-head-ruler" style={{ height: RULER }} />
         {clipsTop !== null && (
@@ -832,6 +881,7 @@ function Tracks(p: Props): React.JSX.Element {
           const width = Math.max(2, (visTo - visFrom) * view.pps)
           const m = mediaOf(p.project, it.mediaId)
           const isSubs = it.kind === 'subs'
+          const isFreeze = it.kind === 'freeze'
           const onVideoTrack = row.track.kind === 'video'
           const isVideo = !isSubs && onVideoTrack && !!m?.hasVideo
           const sel = p.selected.includes(it.id)
@@ -841,8 +891,9 @@ function Tracks(p: Props): React.JSX.Element {
           const sound = hasSound(p.project, it)
           // у видеокуска картинка сверху, звук — узкой полосой под ней; у звукового куска всё в одном
           const picH = onVideoTrack ? PIC_H : row.h
-          const cls = `tr-item ${isSubs ? 'subs' : isVideo ? 'video' : 'audio'}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
-          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : (m?.name ?? '—')
+          const cls = `tr-item ${isSubs ? 'subs' : isVideo ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
+          const fxNames = it.effects.filter((e) => e.on).map((e) => EFFECTS[e.type].title.toLowerCase())
+          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : (m?.name ?? '—')
           const srcFrom = tlToSrc(it, visFrom)
           const srcTo = tlToSrc(it, visTo)
           const itemMenu = (e: React.MouseEvent): void => openMenu(e, (x, t, y) => ({ kind: 'item', x, y, itemId: it.id, t }), it)
@@ -874,9 +925,10 @@ function Tracks(p: Props): React.JSX.Element {
                   <span className="tr-label">
                     {label} <span className="mono">{itemDur(it).toFixed(1)} с</span>
                     {it.speed !== 1 && <span className="mono tr-speed"> ×{it.speed}</span>}
+                    {fxNames.length > 0 && <span className="mono tr-fx"> · {fxNames.join(', ')}</span>}
                   </span>
                 )}
-                {!locked && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
+                {!locked && !isFreeze && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
                 {!locked && visTo === end && <span className="tr-edge r" onPointerDown={(e) => startItem(e, it, 'end')} />}
                 {!onVideoTrack && sound && <GainLine {...gainHandlers(row.top, row.h)} />}
               </div>

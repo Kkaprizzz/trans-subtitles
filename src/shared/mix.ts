@@ -3,7 +3,8 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_SPEED, mediaOf, placeFree, subsOf, tlToSrc, trackOf, uid, type Item, type Project } from './project.ts'
+import { EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
+import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project } from './project.ts'
 
 const EPS = 0.02
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
@@ -69,6 +70,7 @@ export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (Math.abs(itemEnd(a) - b.start) > EPS) return 'Между кусками есть пустое место или они наехали друг на друга'
   if (a.audio !== b.audio) return 'У одного звук отделён, у другого прикреплён'
   if (Math.abs(a.speed - b.speed) > 1e-6) return 'У кусков разная скорость'
+  if (!sameEffects(a.effects, b.effects)) return 'У кусков разные эффекты'
   return null
 }
 
@@ -231,4 +233,121 @@ export function setSpeed(p: Project, ids: string[], value: number): Result {
   })
   const markers = p.markers.map((m) => (byTrack.has(m.trackId) ? { ...m, t: r3(Math.max(0, m.t + shift(m.trackId, m.t))) } : m))
   return { p: finish({ ...p, items, markers }) }
+}
+
+// --- стоп-кадр ---
+
+export const DEFAULT_FREEZE = 3
+export const MAX_FREEZE = 600
+const FRAME = 0.04
+
+/** Сдвигает на delta всё, что начинается не раньше from на дорожке (кроме except), и метки этой дорожки. Связанные субтитры идут за видео. */
+function rippleTrack(p: Project, trackId: string, from: number, delta: number, except: string[]): Project {
+  const items = p.items.map((i) =>
+    i.trackId === trackId && !except.includes(i.id) && !(i.kind === 'subs' && i.link) && i.start >= from - EPS ? { ...i, start: r3(Math.max(0, i.start + delta)) } : i
+  )
+  const markers = p.markers.map((m) => (m.trackId === trackId && m.t >= from - EPS ? { ...m, t: r3(Math.max(0, m.t + delta)) } : m))
+  return { ...p, items, markers }
+}
+
+/** Видеокусок, к которому применим стоп-кадр: на видеодорожке, из файла с видео, без блокировки. */
+const freezable = (p: Project, it: Item | undefined): it is Item =>
+  !!it && it.kind === 'media' && itemTrackKind(p, it) === 'video' && !!mediaOf(p, it.mediaId)?.hasVideo && !locked(p, it)
+
+/**
+ * Стоп-кадр в точке t таймлайна на куске id: видео режется вместе со звуком, между половинами встаёт кусок-стопкадр
+ * длиной len (кадр в этой точке, без звука), всё правее на дорожке сдвигается на len. У самого края куска стопкадр
+ * встаёт перед или после без резки.
+ */
+export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FREEZE): { p: Project; id: string; error?: string } {
+  const it = find(p, id)
+  if (!freezable(p, it)) return { p, id: '', error: it && locked(p, it) ? 'Дорожка закреплена: открепи её' : 'Стоп-кадр делается на куске видео' }
+  const length = Math.min(MAX_FREEZE, Math.max(MIN_ITEM, len))
+  const end = itemEnd(it)
+  if (t < it.start - EPS || t > end + EPS) return { p, id: '', error: 'Поставь курсор на кусок видео' }
+  let cur = p
+  let at = t
+  let frame: number
+  if (t <= it.start + MIN_ITEM) {
+    at = it.start
+    frame = it.in
+    cur = rippleTrack(cur, it.trackId, at, length, [])
+  } else if (t >= end - MIN_ITEM) {
+    at = end
+    frame = Math.max(it.in, it.out - FRAME)
+    cur = rippleTrack(cur, it.trackId, at, length, [])
+  } else {
+    frame = tlToSrc(it, t)
+    const s = splitItem(cur, it.id, t)
+    if (!s.id) return { p, id: '', error: 'Здесь не разрезать' }
+    cur = rippleTrack(s.p, it.trackId, at, length, [])
+  }
+  const fz: Item = {
+    id: uid('i'),
+    kind: 'freeze',
+    mediaId: it.mediaId,
+    trackId: it.trackId,
+    start: r3(at),
+    in: r3(frame),
+    out: r3(frame + length),
+    audio: false,
+    speed: 1,
+    volume: 1,
+    gain: [],
+    effects: [],
+    link: null
+  }
+  return { p: finish({ ...cur, items: [...cur.items, fz] }), id: fz.id }
+}
+
+/** Длина стопкадра: правая часть дорожки сдвигается вместе с его краем. */
+export function setFreezeLength(p: Project, id: string, len: number): Result {
+  const it = find(p, id)
+  if (!it || it.kind !== 'freeze') return { p, error: 'Это не стоп-кадр' }
+  if (locked(p, it)) return { p, error: 'Дорожка закреплена: открепи её' }
+  const length = r3(Math.min(MAX_FREEZE, Math.max(MIN_ITEM, len)))
+  const delta = length - (it.out - it.in)
+  if (Math.abs(delta) < 1e-6) return { p }
+  const moved = rippleTrack(p, it.trackId, itemEnd(it), delta, [id])
+  return { p: finish({ ...moved, items: moved.items.map((x) => (x.id === id ? { ...x, out: r3(x.in + length) } : x)) }) }
+}
+
+// --- эффекты ---
+
+/** Эффекты применимы к картинке: куски видео на видеодорожках, оверлеи и стоп-кадры (не звук и не субтитры). */
+export function canHaveEffects(p: Project, it: Item): boolean {
+  if (it.kind === 'subs') return false
+  return itemTrackKind(p, it) === 'video' && !!mediaOf(p, it.mediaId)?.hasVideo
+}
+
+/** Накладывает эффект на куски (с настройками по умолчанию). Если такой эффект на куске уже есть, он остаётся как был. */
+export function addEffect(p: Project, ids: string[], type: EffectType): { p: Project; added: number } {
+  if (!EFFECTS[type]) return { p, added: 0 }
+  let added = 0
+  const items = p.items.map((i) => {
+    if (!ids.includes(i.id) || !canHaveEffects(p, i) || i.effects.some((e) => e.type === type)) return i
+    added++
+    return { ...i, effects: [...i.effects, newEffect(type)] }
+  })
+  return { p: added ? { ...p, items } : p, added }
+}
+
+export function patchEffect(p: Project, itemId: string, effectId: string, patch: { on?: boolean; strength?: number }): Project {
+  return {
+    ...p,
+    items: p.items.map((i) =>
+      i.id !== itemId
+        ? i
+        : {
+            ...i,
+            effects: i.effects.map((e) =>
+              e.id !== effectId ? e : { ...e, ...(patch.on === undefined ? {} : { on: patch.on }), ...(patch.strength === undefined ? {} : { strength: Math.round(Math.min(100, Math.max(0, patch.strength))) }) }
+            )
+          }
+    )
+  }
+}
+
+export function removeEffect(p: Project, itemId: string, effectId: string): Project {
+  return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, effects: i.effects.filter((e) => e.id !== effectId) } : i)) }
 }

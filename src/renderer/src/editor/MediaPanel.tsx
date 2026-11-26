@@ -1,5 +1,6 @@
 /** Панель «Медиа»: файлы проекта с миниатюрами. Тащи на таймлайн или дважды щёлкни — в конец основной дорожки. */
 import { memo } from 'react'
+import { EFFECT_MIME, EFFECT_TYPES, EFFECTS, type EffectType } from '../../../shared/effects'
 import type { MediaRef } from '../../../shared/project'
 import { fmtTime } from '../format'
 import { MEDIA_MIME } from './Tracks'
@@ -14,18 +15,54 @@ interface Props {
   onImport(): void
   onAppend(id: string): void
   onRemove(id: string): void
+  tab: 'media' | 'fx'
+  onTab(t: 'media' | 'fx'): void
+  /** щелчок по карточке эффекта: наложить на выделенные куски */
+  onEffect(t: EffectType): void
 }
 
 function MediaPanel(p: Props): React.JSX.Element {
   return (
     <aside className="media-panel">
       <div className="pane-head">
-        <span>Медиа</span>
-        <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
-          + Импорт
-        </button>
+        <div className="tabs" role="tablist">
+          <button role="tab" aria-selected={p.tab === 'media'} className={p.tab === 'media' ? 'on' : ''} onClick={() => p.onTab('media')}>
+            Медиа
+          </button>
+          <button role="tab" aria-selected={p.tab === 'fx'} className={p.tab === 'fx' ? 'on' : ''} onClick={() => p.onTab('fx')}>
+            Эффекты
+          </button>
+        </div>
+        {p.tab === 'media' && (
+          <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
+            + Импорт
+          </button>
+        )}
       </div>
-      <ul className="media-list">
+      {p.tab === 'fx' && (
+        <ul className="fx-list">
+          {EFFECT_TYPES.map((t) => (
+            <li
+              key={t}
+              className="fx-card"
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(EFFECT_MIME, t)
+                e.dataTransfer.effectAllowed = 'copy'
+              }}
+              onClick={() => p.onEffect(t)}
+              title="Щёлкни — наложить на выделенные куски, или перетащи на кусок"
+            >
+              <span className={`fx-swatch ${t}`} />
+              <span className="fx-meta">
+                <span className="fx-name">{EFFECTS[t].title}</span>
+                <span className="dim">{EFFECTS[t].description}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <ul className="media-list" hidden={p.tab !== 'media'}>
         {p.media.length === 0 && <li className="empty">Добавь видео или звук: «+ Импорт» или перетащи файлы в окно</li>}
         {p.media.map((m) => {
           const lost = p.missing.has(m.path)

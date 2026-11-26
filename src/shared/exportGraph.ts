@@ -8,8 +8,9 @@
  * задерживаются на свой start и сводятся без нормализации.
  */
 import { gainExpr, gainPeak } from './audio.ts'
+import { effectFilters } from './effects.ts'
 import { framingChain } from './cut.ts'
-import { itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
+import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
 export type ExportFormat = 'h264' | 'prores422'
 export type ExportQuality = 'high' | 'medium' | 'small'
@@ -61,6 +62,12 @@ const retime = (speed: number, start: string, fps: number): string =>
     ? `fps=${fps},setpts=PTS-STARTPTS+${start}/TB`
     : `setpts=(PTS-STARTPTS)/${speed.toFixed(4)}+${start}/TB,fps=${fps}`
 
+/** Стоп-кадр: один кадр размножается на всю длину куска (len секунд) и встаёт на своё время. */
+const freezeTiming = (len: number, start: string, fps: number): string => {
+  const n = Math.max(1, Math.round(len * fps))
+  return `trim=end_frame=1,setpts=PTS-STARTPTS,fps=${fps},loop=loop=${n - 1}:size=1:start=0,setpts=PTS-STARTPTS+${start}/TB`
+}
+
 /** Цепочка atempo для скорости (один фильтр держит 0.5–2; тон сохраняется). Пусто при скорости 1. */
 export function tempoFilter(speed: number): string {
   if (Math.abs(speed - 1) < 1e-6) return ''
@@ -92,7 +99,7 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
   const hidden = new Set(p.tracks.filter((t) => t.hidden).map((t) => t.id))
   // снизу вверх: больший индекс дорожки — ниже; в пределах дорожки по времени
   const items = p.items
-    .filter((i) => i.kind === 'media')
+    .filter((i) => i.kind === 'media' || i.kind === 'freeze')
     .sort((a, b) => (trackIdx.get(b.trackId) ?? 0) - (trackIdx.get(a.trackId) ?? 0) || a.start - b.start)
 
   const inputs: string[] = []
@@ -109,11 +116,12 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
     if (!m) continue
     // картинку даёт только кусок на видеодорожке (звук, отделённый от видео, лежит на звуковой); звук — если он прикреплён и не нулевой
     const useV = itemTrackKind(p, it) === 'video' && m.hasVideo && !hidden.has(it.trackId)
-    const useA = m.hasAudio && it.audio && !muted.has(it.trackId) && gainPeak(it.gain, it.volume, it.in, it.out) > 0
+    const useA = it.kind === 'media' && m.hasAudio && it.audio && !muted.has(it.trackId) && gainPeak(it.gain, it.volume, it.in, it.out) > 0
     if (!useV && !useA) continue
     const k = inputCount++
     // вход режется по файлу (секунды исходника); скорость применяется фильтрами ниже
-    inputs.push('-ss', f3(it.in), '-t', f3(it.out - it.in), '-i', m.path)
+    // стоп-кадр берёт из файла один кадр с секунды in
+    inputs.push('-ss', f3(it.in), '-t', it.kind === 'freeze' ? '0.5' : f3(it.out - it.in), '-i', m.path)
     const s = f3(it.start)
     const e = f3(itemEnd(it))
     if (useV) {
@@ -122,14 +130,16 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
         sort: it.start,
         apply: () => {
           const framed = o.framing && o.framing.mediaId === it.mediaId
+          const timing = it.kind === 'freeze' ? freezeTiming(itemDur(it), s, o.fps) : retime(it.speed, s, o.fps)
+          // эффекты кладутся на готовый кадр куска (после вписывания/кадрирования): сила блюра считается от высоты кадра
+          const fx = effectFilters(it.effects, H)
+          const vOut = fx.length ? `f${k}` : `v${k}`
           if (framed && o.framing) {
-            graph.push(
-              `[${k}:v]${retime(it.speed, s, o.fps)}[r${k}]`,
-              ...framingChain(`r${k}`, `v${k}`, o.framing.mode, o.framing.offsetX, W, H, String(k))
-            )
+            graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k)))
           } else {
-            graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${retime(it.speed, s, o.fps)}[v${k}]`)
+            graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${timing}[${vOut}]`)
           }
+          if (fx.length) graph.push(`[${vOut}]${fx.join(',')}[v${k}]`)
           graph.push(`[${last}][v${k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
           last = `o${k}`
         }

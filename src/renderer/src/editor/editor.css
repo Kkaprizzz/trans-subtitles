@@ -1601,3 +1601,126 @@ textarea {
   font-size: 11px;
   color: var(--ink-3);
 }
+
+/* стоп-кадр и эффекты на куске */
+.tr-item.freeze {
+  background: repeating-linear-gradient(135deg, #2c4a54 0 7px, #24404a 7px 14px);
+}
+.tr-fx {
+  color: var(--accent) !important;
+}
+
+/* вкладки левой панели и карточки эффектов */
+.tabs {
+  display: flex;
+  gap: 2px;
+}
+.tabs button {
+  padding: 4px 10px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tabs button:hover {
+  color: var(--ink-2);
+}
+.tabs button.on {
+  color: var(--ink);
+  background: var(--panel-3);
+}
+.fx-list {
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+}
+.fx-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.fx-card:hover {
+  background: var(--panel-3);
+}
+.fx-swatch {
+  flex: none;
+  width: 46px;
+  height: 34px;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #1fc8d6 0 33%, #f0a35a 33% 66%, #b48aec 66%);
+}
+.fx-swatch.blur {
+  filter: blur(4px);
+}
+.fx-meta {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+.fx-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+/* тяга карточки эффекта над куском */
+.tr-item.fx-over,
+.tr-item.fx-over:hover {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.media-list[hidden] {
+  display: none;
+}
+.fx-row {
+  display: grid;
+  grid-template-columns: 22px auto 1fr 28px 22px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel-sunk);
+  border-radius: var(--radius);
+}
+.fx-row.off {
+  opacity: 0.55;
+}
+.fx-row input[type='range'] {
+  min-width: 0;
+}
+.fx-title {
+  font-size: 12px;
+}
+.fx-val {
+  font-size: 11px;
+  text-align: right;
+  color: var(--ink-2);
+}
+.fx-eye,
+.fx-del {
+  padding: 0;
+  font: inherit;
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.fx-eye {
+  color: var(--accent);
+}
+.fx-row.off .fx-eye {
+  color: var(--ink-3);
+}
+.fx-del:hover {
+  color: var(--ink);
+}
+.fx-none {
+  font-size: 12px;
+}

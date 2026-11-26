@@ -71,11 +71,14 @@ function mediaItems(p: Project, mediaId: string): Item[] {
  * берём то место (цепочку впритык лежащих кусков), где пересечение с рамкой больше всего.
  */
 export function placement(p: Project, c: Clip): Placement | null {
-  const hit = mediaItems(p, c.mediaId)
-    .filter((i) => i.in < c.end - 1e-6 && i.out > c.start + 1e-6)
-    .sort((a, b) => a.start - b.start)
-  if (hit.length === 0) return null
-  const overlap = (i: Item): number => Math.min(i.out, c.end) - Math.max(i.in, c.start)
+  const media = mediaItems(p, c.mediaId).filter((i) => i.in < c.end - 1e-6 && i.out > c.start + 1e-6)
+  if (media.length === 0) return null
+  // стоп-кадры этого файла внутри рамки — её часть: лежат между кусками видео и склеивают их в одну цепочку
+  const spanFrom = Math.min(...media.map((i) => i.start))
+  const spanTo = Math.max(...media.map(itemEnd))
+  const freezes = p.items.filter((i) => i.kind === 'freeze' && i.mediaId === c.mediaId && i.start >= spanFrom - 0.05 && itemEnd(i) <= spanTo + 0.05)
+  const hit = [...media, ...freezes].sort((a, b) => a.start - b.start)
+  const overlap = (i: Item): number => (i.kind === 'freeze' ? 0 : Math.min(i.out, c.end) - Math.max(i.in, c.start))
   const chains: Item[][] = []
   for (const i of hit) {
     const last = chains[chains.length - 1]
@@ -85,8 +88,8 @@ export function placement(p: Project, c: Clip): Placement | null {
   const best = chains.reduce((a, b) => (b.reduce((n, i) => n + overlap(i), 0) > a.reduce((n, i) => n + overlap(i), 0) ? b : a))
   const first = best[0]
   const last = best[best.length - 1]
-  const start = srcToTl(first, Math.max(first.in, c.start))
-  const end = srcToTl(last, Math.min(last.out, c.end))
+  const start = first.kind === 'freeze' ? first.start : srcToTl(first, Math.max(first.in, c.start))
+  const end = last.kind === 'freeze' ? itemEnd(last) : srcToTl(last, Math.min(last.out, c.end))
   const main = best.reduce((a, b) => (overlap(b) > overlap(a) ? b : a))
   return { start: r3(start), end: r3(Math.max(start, end)), itemId: main.id }
 }
@@ -224,7 +227,8 @@ export function cropProject(p: Project, a: number, b: number): Project {
     const s = Math.max(it.start, a)
     const e = Math.min(end, b)
     if (e - s < MIN_ITEM / 2) continue
-    items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)) })
+    if (it.kind === 'freeze') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)) })
+    else items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)) })
   }
   return { ...p, items, markers: [], clips: [] }
 }
