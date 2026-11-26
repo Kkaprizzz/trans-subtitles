@@ -149,6 +149,11 @@ export default function App(): React.JSX.Element {
         { label: 'Разрезать', shortcut: 'S', disabled: !ed?.hasItems, action: () => c()?.split() },
         { label: 'Стоп-кадр', shortcut: 'Shift+S', disabled: !ed?.hasItems, action: () => c()?.freeze() },
         { label: 'Текст', disabled: !inEditor, action: () => c()?.addText() },
+        { label: 'Копировать', shortcut: 'Ctrl+C', disabled: !ed?.hasSel, action: () => c()?.copy() },
+        { label: 'Вырезать', shortcut: 'Ctrl+X', disabled: !ed?.hasSel, action: () => c()?.cut() },
+        { label: 'Вставить', shortcut: 'Ctrl+V', disabled: !ed?.canPaste, action: () => c()?.paste() },
+        { label: 'Дублировать', shortcut: 'Ctrl+D', disabled: !ed?.hasSel, action: () => c()?.duplicate() },
+        'sep',
         { label: 'Удалить', shortcut: 'Delete', disabled: !ed?.hasSel, action: () => c()?.del() },
         { label: 'Удалить и закрыть дыру', shortcut: 'Shift+Delete', disabled: !ed?.hasSel, action: () => c()?.delRipple() },
         { label: 'Соединить куски', shortcut: 'Ctrl+J', disabled: !ed?.hasSel, action: () => c()?.join() },
@@ -201,17 +206,18 @@ export default function App(): React.JSX.Element {
           if (e.target === e.currentTarget) void window.api.winToggleMax()
         }}
       >
-        <span className="app-logo" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <button
+          className="app-logo"
+          disabled={!inEditor}
+          onClick={() => void c()?.close()}
+          title={inEditor ? 'К списку проектов (Ctrl+W)' : undefined}
+          aria-label="К списку проектов"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M5 7h14M5 12h9M5 17h11" />
           </svg>
-        </span>
+        </button>
         <MenuBar menus={menus} />
-        {inEditor && (
-          <button className="btn ghost small" onClick={() => void c()?.close()} title="К списку проектов (Ctrl+W)">
-            ← Проекты
-          </button>
-        )}
         <span className="app-title">{inEditor ? ed.name : 'Trans Subtitles'}</span>
         <span className="spacer" />
         {inEditor && ed.status && <span className={`app-status${ed.statusErr ? ' warn' : ' dim'}`}>{ed.status}</span>}

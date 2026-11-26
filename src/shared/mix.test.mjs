@@ -7,12 +7,13 @@ import { effectFilters, blurSigma, sameEffects, cleanEffects, cssFilter, newEffe
 import { cleanFrame, DEFAULT_FRAME, frameFilters, frameRect, isDefaultFrame, fitSize, patchFrameValues, sameFrame } from './frame.ts'
 import { patchFrame, resetFrame } from './mix.ts'
 import { insertText, patchPlate } from './mix.ts'
+import { copyItems, pasteItems, duplicateItems } from './mix.ts'
 import { PLATE_STYLES, cleanPlate, newPlate, plateLabel, patchPlateValues } from './plate.ts'
 import { FONTS } from './fonts.ts'
 import { cropProject, orderedClips, placement, makeClip, sourceAt } from './cut.ts'
 import { setSpeed, clampSpeed } from './mix.ts'
 import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, itemGainAt, joinItems, joinSelected, joinWithNeighbor, moveGainPoint, neighbors, setBaseVolume } from './mix.ts'
-import { projectDuration, addMarker, addMedia, addSubtitles, applyRecognized, insertMedia, itemDur, itemEnd, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, subtitleLayers, tlToSrc, trimItem, videoTracks } from './project.ts'
+import { removeMedia, projectDuration, addMarker, addMedia, addSubtitles, applyRecognized, insertMedia, itemDur, itemEnd, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, subtitleLayers, tlToSrc, trimItem, videoTracks } from './project.ts'
 
 const V = (path, duration, extra = {}) => ({ path, name: path, duration, hasVideo: true, hasAudio: true, width: 1280, height: 720, fps: 25, needsPreview: false, ...extra })
 const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-3, `${msg}: ${a} != ${b}`)
@@ -679,6 +680,106 @@ void subsOf
   onAudio.items.find((i) => i.kind === 'text').trackId = onAudio.tracks.find((t) => t.kind === 'audio').id
   assert.ok(!sanitizeProject(onAudio).items.some((i) => i.kind === 'text'), 'надпись на звуковой дорожке выброшена')
   assert.equal(cleanPlate({ font: 'prata', weight: 400 }, FONTS.map((f) => f.id)).font, 'prata')
+}
+
+// === копирование и вставка ===
+{
+  let q = newProject('Копи')
+  q = addMedia(q, V('/a.mp4', 20)).p
+  q = addMedia(q, V('/b.mp4', 10)).p
+  q = addMedia(q, { path: '/m.mp3', name: 'm', duration: 30, hasVideo: false, hasAudio: true, needsPreview: false }).p
+  const [qa, qb, qm] = q.media.map((m) => m.id)
+  const a1 = insertMedia(q, qa, 0)
+  q = a1.p
+  const trackV = q.items.find((i) => i.id === a1.id).trackId
+  const b1 = insertMedia(q, qb, 4)  // внахлёст — верхняя дорожка
+  q = b1.p
+  const mu = insertMedia(q, qm, 2)
+  q = mu.p
+  q = applyRecognized(q, qa, 0, 20, [{ id: 0, text: 'раз', start: 8, end: 9 }])
+  q = addSubtitles(q, [a1.id])
+  q = addGainPoint(q, a1.id, 3, 0.5).p
+  q = setSpeed(q, [b1.id], 2).p
+  q = addEffect(q, [b1.id], 'blur').p
+  q = patchFrame(q, b1.id, { scale: 50 })
+  const txt = insertText(q, 1, 'title')
+  q = txt.p
+
+  // копируются выделенное и связанные субтитры; метки не берём
+  const ce = copyItems(q, [a1.id])
+  assert.equal(ce.length, 2, 'видео и его связанные субтитры')
+  assert.ok(ce.some((e) => e.item.kind === 'subs'))
+  assert.equal(copyItems(q, [a1.id, b1.id, mu.id]).length, 4)
+  assert.equal(copyItems(q, ['нет']).length, 0)
+  ce[0].item.start = 999
+  assert.notEqual(q.items.find((i) => i.id === a1.id).start, 999, 'буфер — независимая копия')
+
+  // вставка: начало самого раннего на курсор, расстояния и дорожки сохраняются
+  const set = copyItems(q, [a1.id, b1.id, mu.id])
+  const r = pasteItems(q, set, 30)
+  assert.equal(r.skipped, 0)
+  const nv = r.p.items.find((i) => r.ids.includes(i.id) && i.mediaId === qa && i.kind === 'media')
+  const nb = r.p.items.find((i) => r.ids.includes(i.id) && i.mediaId === qb)
+  const nm = r.p.items.find((i) => r.ids.includes(i.id) && i.mediaId === qm)
+  assert.equal(nv.start, 30, 'самый ранний кусок на курсоре')
+  assert.equal(nb.start, 34, 'расстояние между кусками то же (4 с)')
+  assert.equal(nm.start, 32)
+  assert.equal(nv.trackId, trackV, 'остался на своей дорожке')
+  assert.equal(r.p.tracks.find((t) => t.id === nm.trackId).kind, 'audio', 'звук — на звуковой')
+  assert.equal(nb.speed, 2)
+  assert.equal(nb.effects.length, 1)
+  assert.equal(nb.frame.scale, 50)
+  assert.deepEqual(nv.gain, q.items.find((i) => i.id === a1.id).gain, 'линия громкости скопирована')
+  assert.ok(!r.p.items.some((i) => i.id !== a1.id && i.id === nv.id && false))
+  assert.notEqual(nv.id, a1.id, 'у копии новый id')
+  assert.equal(r.p.items.length, q.items.length + 4)
+  // субтитры копии связаны с копией видео
+  const ns = r.p.items.find((i) => r.ids.includes(i.id) && i.kind === 'subs')
+  assert.equal(ns.link, nv.id)
+  assert.equal(ns.start, nv.start)
+  assert.deepEqual(subtitleLayers(r.p).flatMap((l) => l.words.map((w) => w.text)), ['раз', 'раз'], 'слова копии на месте')
+  // вставка не двигает остальное
+  assert.equal(r.p.items.find((i) => i.id === a1.id).start, 0)
+  // можно вставлять сколько угодно раз; занято — уходит на свободную дорожку
+  const r2 = pasteItems(r.p, set, 30)
+  const nv2 = r2.p.items.find((i) => r2.ids.includes(i.id) && i.mediaId === qa && i.kind === 'media')
+  assert.notEqual(nv2.trackId, nv.trackId, 'место занято первой копией — другая дорожка')
+  assert.equal(nv2.start, 30)
+  // закреплённая дорожка не принимает вставку
+  const rl = pasteItems(setTrack(q, trackV, { locked: true }), copyItems(q, [a1.id]), 30)
+  assert.notEqual(rl.p.items.find((i) => rl.ids.includes(i.id) && i.kind === 'media').trackId, trackV)
+  // файл удалён после копирования — пропускается; вместе с ним его субтитры
+  const gone = removeMedia(q, qa)
+  const rg = pasteItems(gone, set, 30)
+  assert.equal(rg.skipped, 2, 'видео и его субтитры')
+  assert.equal(rg.ids.length, 2, 'остальное вставилось')
+  // надпись и стоп-кадр копируются
+  const rt = pasteItems(q, copyItems(q, [txt.id]), 10)
+  assert.equal(rt.p.items.find((i) => rt.ids.includes(i.id)).plate.text, 'Текст')
+  const fz = insertFreeze(q, a1.id, 6)
+  const rf = pasteItems(fz.p, copyItems(fz.p, [fz.id]), 40)
+  assert.equal(rf.p.items.find((i) => rf.ids.includes(i.id)).kind, 'freeze')
+  // отдельный звук остаётся звуком
+  const dt = detachAudio(q, b1.id)
+  const rd = pasteItems(dt.p, copyItems(dt.p, [dt.id]), 20)
+  const nd = rd.p.items.find((i) => rd.ids.includes(i.id))
+  assert.equal(rd.p.tracks.find((t) => t.id === nd.trackId).kind, 'audio', 'звук из видеофайла вставлен на звуковую дорожку')
+  assert.equal(nd.audio, true)
+  // пустой буфер
+  assert.deepEqual(pasteItems(q, [], 5), { p: q, ids: [], skipped: 0 })
+
+  // дублирование: сразу после конца оригинала
+  const d = duplicateItems(q, [a1.id])
+  const dv = d.p.items.find((i) => d.ids.includes(i.id) && i.kind === 'media')
+  assert.equal(dv.start, 20, 'сразу после оригинала (0 + 20 с)')
+  assert.equal(d.ids.length, 2, 'видео и субтитры')
+  const dg = duplicateItems(q, [a1.id, b1.id])
+  const starts = dg.p.items.filter((i) => dg.ids.includes(i.id) && i.kind === 'media').map((i) => i.start).sort((x, y) => x - y)
+  assert.deepEqual(starts, [20, 24], 'группа целиком после самого позднего конца, расстояния те же')
+  // экспорт копии: звук и картинка на месте
+  const og = { W: 1280, H: 720, fps: 25, format: 'h264', quality: 'medium', subLayers: [] }
+  const c = buildExport(r.p, og, '/o.mp4')
+  assert.equal(c.total, 62, 'длина проекта = конец вставленной музыки (32 + 30)')
 }
 
 console.log('mix.ts, audio.ts: все проверки прошли')

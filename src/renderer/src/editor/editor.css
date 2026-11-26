@@ -78,7 +78,19 @@ textarea {
   place-items: center;
   color: var(--accent-ink);
   background: var(--accent);
+  border: 0;
+  padding: 0;
   border-radius: 7px;
+  -webkit-app-region: no-drag;
+}
+.app-logo:not(:disabled) {
+  cursor: pointer;
+}
+.app-logo:not(:disabled):hover {
+  background: var(--accent-2);
+}
+.app-logo:disabled {
+  opacity: 1;
 }
 .app-title {
   position: absolute;
@@ -359,7 +371,80 @@ textarea {
 .media-panel {
   grid-area: media;
   display: flex;
+  flex-direction: row;
+}
+.media-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
   flex-direction: column;
+  /* адаптивность по ширине самой панели: узкая — список, широкая — сетка плиток */
+  container-type: inline-size;
+  container-name: mbody;
+}
+/* колонка вкладок слева */
+.side-tabs {
+  flex: none;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 5px;
+  background: var(--panel-sunk);
+  border-right: 1px solid var(--line);
+}
+.side-tabs button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--ink-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.side-tabs button:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.side-tabs button.on {
+  color: var(--ink);
+  background: var(--panel-3);
+}
+.side-tabs button.on::before {
+  content: '';
+  position: absolute;
+  left: -5px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+/* подпись вкладки — при наведении */
+.side-tabs button::after {
+  content: attr(data-label);
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--ink);
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 30;
+}
+.side-tabs button:hover::after {
+  opacity: 1;
+  transition: opacity var(--t-fast) var(--ease) 350ms;
 }
 .media-list {
   list-style: none;
@@ -1228,8 +1313,11 @@ textarea {
 
 /* --- контекстное меню дорожки --- */
 .ctx {
-  position: absolute;
-  z-index: 40;
+  /* fixed: не обрезается краями таймлайна; положение держит код по границам окна */
+  position: fixed;
+  z-index: 2500;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   min-width: 270px;
   padding: 5px;
   background: var(--panel-2);
@@ -1611,27 +1699,6 @@ textarea {
 }
 
 /* вкладки левой панели и карточки эффектов */
-.tabs {
-  display: flex;
-  gap: 2px;
-}
-.tabs button {
-  padding: 4px 10px;
-  font: inherit;
-  font-weight: 600;
-  color: var(--ink-3);
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-.tabs button:hover {
-  color: var(--ink-2);
-}
-.tabs button.on {
-  color: var(--ink);
-  background: var(--panel-3);
-}
 .fx-list {
   margin: 0;
   padding: 8px;
@@ -1836,4 +1903,38 @@ textarea {
   background: #1c1c1f;
   color: #fff;
   font-size: 16px;
+}
+
+
+/* широкая панель: содержимое вкладок раскладывается плитками в сетку (число колонок — по ширине) */
+@container mbody (min-width: 300px) {
+  .fx-list,
+  .media-list:not([hidden]) {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    gap: 8px;
+    align-content: start;
+  }
+  .media-list .empty {
+    grid-column: 1 / -1;
+  }
+  .fx-card {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .fx-swatch {
+    width: 100%;
+    height: 58px;
+  }
+  .media-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    align-items: start;
+  }
+  .media-thumb {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
 }

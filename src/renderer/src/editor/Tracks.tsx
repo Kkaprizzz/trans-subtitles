@@ -78,6 +78,12 @@ interface Props {
   onMessage(msg: string): void
   /** карточку эффекта бросили на кусок */
   onDropEffect(itemId: string, type: EffectType): void
+  /** буфер копирования не пуст */
+  canPaste: boolean
+  onCopy(): void
+  onCut(): void
+  onPaste(): void
+  onDuplicate(): void
   /** фокус на рамке: вне неё затемнено, вид приближен */
   focus: { start: number; end: number } | null
   /** внешняя команда «показать всё» — меняется счётчик */
@@ -313,6 +319,27 @@ function Tracks(p: Props): React.JSX.Element {
     | { kind: 'line'; x: number; y: number; itemId: string; t: number }
     | { kind: 'point'; x: number; y: number; itemId: string; idx: number }
   const [menu, setMenu] = useState<Menu | null>(null)
+  // та же плавающая менюшка, но по границам окна: если не влезает — поднимается/сдвигается, чтобы не обрезаться
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [menuPos, setMenuPos] = useState({ left: 0, top: 0, ready: false })
+  useLayoutEffect(() => {
+    const el = menuRef.current
+    const box = boxRef.current
+    if (!menu || !el || !box) {
+      setMenuPos((m) => (m.ready ? { left: 0, top: 0, ready: false } : m))
+      return
+    }
+    const r = box.getBoundingClientRect()
+    const mw = el.offsetWidth
+    const mh = el.offsetHeight
+    const M = 8
+    // точка щелчка в координатах окна; меню у позиционирования fixed
+    const cx = r.left + menu.x
+    const cy = r.top + menu.y
+    const left = Math.max(M, Math.min(cx, window.innerWidth - mw - M))
+    const top = Math.max(M, Math.min(cy, window.innerHeight - mh - M))
+    setMenuPos({ left, top, ready: true })
+  }, [menu]) // eslint-disable-line react-hooks/exhaustive-deps
   const dragRef = useRef<Drag | null>(null)
   const fitted = useRef(false)
 
@@ -522,12 +549,20 @@ function Tracks(p: Props): React.JSX.Element {
     const say = (error?: string): void => {
       if (error) p.onMessage(error)
     }
-    if (m.kind === 'lane') return [{ label: 'Добавить метку', key: 'M', run: () => addMarkerAt(m.trackId, m.t) }]
+    if (m.kind === 'lane') {
+      const lane: Array<{ label: string; key?: string; run(): void }> = []
+      if (p.canPaste) lane.push({ label: 'Вставить', key: 'Ctrl+V', run: p.onPaste })
+      lane.push({ label: 'Добавить метку', key: 'M', run: () => addMarkerAt(m.trackId, m.t) })
+      return lane
+    }
     const it = pr.items.find((i) => i.id === m.itemId)
     if (!it) return []
     if (m.kind === 'line') return [{ label: 'Добавить точку', run: () => p.onCommit(addGainPoint(pr, it.id, m.t).p) }]
     if (m.kind === 'point') return [{ label: 'Удалить точку', run: () => p.onCommit(deleteGainPoint(pr, it.id, m.idx)) }]
     const out: Array<{ label: string; key?: string; run(): void }> = []
+    out.push({ label: 'Копировать', key: 'Ctrl+C', run: p.onCopy }, { label: 'Вырезать', key: 'Ctrl+X', run: p.onCut })
+    if (p.canPaste) out.push({ label: 'Вставить', key: 'Ctrl+V', run: p.onPaste })
+    out.push({ label: 'Дублировать', key: 'Ctrl+D', run: p.onDuplicate })
     const media = mediaOf(pr, it.mediaId)
     const own = pr.tracks.find((t) => t.id === it.trackId)
     if (it.kind === 'media' && own?.kind === 'video' && media?.hasVideo && hasSound(pr, it)) {
@@ -1009,7 +1044,7 @@ function Tracks(p: Props): React.JSX.Element {
           />
         )}
         {menu && (
-          <div className="ctx" style={{ left: Math.min(menu.x, Math.max(0, w - 290)), top: Math.min(menu.y, Math.max(0, h - 32 * menuEntries(menu).length - 14)) }} onPointerDown={(e) => e.stopPropagation()} role="menu">
+          <div ref={menuRef} className="ctx" style={{ left: menuPos.left, top: menuPos.top, visibility: menuPos.ready ? 'visible' : 'hidden' }} onPointerDown={(e) => e.stopPropagation()} role="menu">
             {menuEntries(menu).map((en) => (
               <button
                 key={en.label}

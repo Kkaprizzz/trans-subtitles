@@ -6,7 +6,7 @@ import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
 import { clampParam, EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
 import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
-import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project } from './project.ts'
+import { finish, fits, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
 
 const EPS = 0.02
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
@@ -408,4 +408,80 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
 /** Меняет параметры надписи (числа зажимаются в пределы). */
 export function patchPlate(p: Project, id: string, patch: Partial<Plate>): Project {
   return { ...p, items: p.items.map((i) => (i.id === id && i.kind === 'text' && i.plate && !locked(p, i) ? { ...i, plate: patchPlateValues(i.plate, patch) } : i)) }
+}
+
+// --- копирование и вставка ---
+
+/** Кусок в буфере: его полная копия и вид дорожки, на которой он лежал (звук из видеофайла остаётся звуком). */
+export interface ClipEntry {
+  item: Item
+  kind: TrackKind
+}
+
+/**
+ * Копирует выделенные куски целиком (картинка, звук, линия громкости, скорость, эффекты, кадр, надпись). Субтитры,
+ * связанные с копируемым видео, берутся вместе с ним. Метки и рамки «Клипы» не копируются.
+ */
+export function copyItems(p: Project, ids: string[]): ClipEntry[] {
+  const picked = new Set(ids.filter((id) => p.items.some((i) => i.id === id)))
+  for (const i of p.items) if (i.kind === 'subs' && i.link && picked.has(i.link)) picked.add(i.id)
+  return p.items
+    .filter((i) => picked.has(i.id))
+    .sort((a, b) => a.start - b.start)
+    .map((i) => ({ item: JSON.parse(JSON.stringify(i)) as Item, kind: itemTrackKind(p, i) }))
+}
+
+/**
+ * Вставляет копии так, что начало самого раннего куска встаёт на at, остальные сохраняют расстояния между собой и свои
+ * дорожки. Место занято, дорожка закреплена или удалена — ближайшая свободная дорожка того же вида или новая. Файлы,
+ * которых в проекте уже нет, пропускаются (skipped). Правая часть дорожки не двигается.
+ */
+export function pasteItems(p: Project, entries: ClipEntry[], at: number): { p: Project; ids: string[]; skipped: number } {
+  if (entries.length === 0) return { p, ids: [], skipped: 0 }
+  const t0 = Math.min(...entries.map((e) => e.item.start))
+  const shift = Math.max(0, at) - t0
+  const hasFile = (it: Item): boolean => it.kind === 'text' || !!mediaOf(p, it.mediaId)
+  const idMap = new Map<string, string>()
+  let cur = p
+  let skipped = 0
+  const ids: string[] = []
+  const place = (e: ClipEntry): void => {
+    const it = e.item
+    const start = r3(it.start + shift)
+    const end = start + itemDur(it)
+    const own = cur.tracks.find((t) => t.id === it.trackId && t.kind === e.kind)
+    const target = own && !own.locked && fits(cur, own.id, start, end) ? { p: cur, id: own.id } : placeFree(cur, e.kind, start, end, own?.id)
+    const copy: Item = { ...(JSON.parse(JSON.stringify(it)) as Item), id: uid('i'), trackId: target.id, start }
+    idMap.set(it.id, copy.id)
+    ids.push(copy.id)
+    cur = { ...target.p, items: [...target.p.items, copy] }
+  }
+  // сначала всё, кроме субтитров, потом субтитры: их связь переводится на копии видео
+  const rest = entries.filter((e) => e.item.kind !== 'subs')
+  for (const e of rest) {
+    if (!hasFile(e.item)) {
+      skipped++
+      continue
+    }
+    place(e)
+  }
+  for (const e of entries.filter((x) => x.item.kind === 'subs')) {
+    if (!hasFile(e.item) || (e.item.link && !idMap.has(e.item.link) && entries.some((x) => x.item.id === e.item.link))) {
+      skipped++
+      continue
+    }
+    place(e)
+  }
+  // связи субтитров: на копию видео, а если видео не копировалось — субтитры живут сами
+  const items = cur.items.map((i) => (ids.includes(i.id) && i.kind === 'subs' ? { ...i, link: i.link ? (idMap.get(i.link) ?? null) : null } : i))
+  return { p: finish({ ...cur, items }), ids, skipped }
+}
+
+/** Дублирование: копия выделенного встаёт сразу после конца оригинала. Буфер не трогается. */
+export function duplicateItems(p: Project, ids: string[]): { p: Project; ids: string[] } {
+  const entries = copyItems(p, ids)
+  if (entries.length === 0) return { p, ids: [] }
+  const end = Math.max(...entries.map((e) => itemEnd(e.item)))
+  const r = pasteItems(p, entries, end)
+  return { p: r.p, ids: r.ids }
 }

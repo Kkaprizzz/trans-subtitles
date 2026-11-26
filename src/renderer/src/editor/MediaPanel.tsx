@@ -24,21 +24,28 @@ interface Props {
   onEffect(t: EffectType): void
 }
 
+const TABS: Array<{ id: 'media' | 'fx' | 'text'; label: string; d: string }> = [
+  { id: 'media', label: 'Медиа', d: 'M3 6h13v12H3zM16 10l5-3v10l-5-3' },
+  { id: 'fx', label: 'Эффекты', d: 'M12 3l1.8 4.7L18.5 9l-4.7 1.8L12 15.5l-1.8-4.7L5.5 9l4.7-1.8zM18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z' },
+  { id: 'text', label: 'Текст', d: 'M5 6h14M12 6v13M9 19h6' }
+]
+
 function MediaPanel(p: Props): React.JSX.Element {
   return (
     <aside className="media-panel">
+      {/* узкая колонка вкладок слева: только значки, подпись — при наведении */}
+      <nav className="side-tabs" role="tablist" aria-orientation="vertical">
+        {TABS.map((t) => (
+          <button key={t.id} role="tab" aria-selected={p.tab === t.id} aria-label={t.label} data-label={t.label} className={p.tab === t.id ? 'on' : ''} onClick={() => p.onTab(t.id)}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d={t.d} />
+            </svg>
+          </button>
+        ))}
+      </nav>
+      <div className="media-body">
       <div className="pane-head">
-        <div className="tabs" role="tablist">
-          <button role="tab" aria-selected={p.tab === 'media'} className={p.tab === 'media' ? 'on' : ''} onClick={() => p.onTab('media')}>
-            Медиа
-          </button>
-          <button role="tab" aria-selected={p.tab === 'fx'} className={p.tab === 'fx' ? 'on' : ''} onClick={() => p.onTab('fx')}>
-            Эффекты
-          </button>
-          <button role="tab" aria-selected={p.tab === 'text'} className={p.tab === 'text' ? 'on' : ''} onClick={() => p.onTab('text')}>
-            Текст
-          </button>
-        </div>
+        <span>{TABS.find((t) => t.id === p.tab)?.label}</span>
         {p.tab === 'media' && (
           <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
             + Импорт
@@ -131,6 +138,7 @@ function MediaPanel(p: Props): React.JSX.Element {
           )
         })}
       </ul>
+      </div>
     </aside>
   )
 }

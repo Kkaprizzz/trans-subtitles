@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, canHaveEffects, insertFreeze, insertText, joinSelected, patchFrame, patchPlate } from '../../../shared/mix'
+import { addEffect, canHaveEffects, copyItems, duplicateItems, insertFreeze, insertText, joinSelected, pasteItems, patchFrame, patchPlate, type ClipEntry } from '../../../shared/mix'
 import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
@@ -75,6 +75,10 @@ export interface EditorCommands {
   freeze(): void
   /** поставить надпись на курсор */
   addText(): void
+  copy(): void
+  cut(): void
+  paste(): void
+  duplicate(): void
   /** поставить метку на курсоре */
   addMarker(): void
   selectAll(): void
@@ -93,6 +97,8 @@ export interface EditorState {
   canRedo: boolean
   hasSel: boolean
   hasItems: boolean
+  /** в буфере есть куски для вставки */
+  canPaste: boolean
   duration: number
   status: string | null
   statusErr: boolean
@@ -133,7 +139,7 @@ function loadLayout(): Layout {
 function clampLayout(l: Layout): Layout {
   const W = window.innerWidth
   const H = window.innerHeight
-  const mw = Math.min(Math.max(170, l.mw), Math.max(170, Math.min(560, W - 420 - Math.max(220, l.iw))))
+  const mw = Math.min(Math.max(260, l.mw), Math.max(260, Math.min(560, W - 420 - Math.max(220, l.iw))))
   const iw = Math.min(Math.max(220, l.iw), Math.max(220, Math.min(600, W - 420 - mw)))
   const th = Math.min(Math.max(150, l.th), Math.max(150, H - 44 - 200))
   return { mw: Math.round(mw), iw: Math.round(iw), th: Math.round(th) }
@@ -210,6 +216,13 @@ export default function Editor(p: Props): React.JSX.Element {
   const [clipsError, setClipsError] = useState<string | null>(null)
   // отмена нажата: следующие шаги цепочки (распознавание → ИИ) не начинаются
   const cancelledRef = useRef(false)
+  // буфер копирования живёт, пока открыт этот проект
+  const clipRef = useRef<ClipEntry[]>([])
+  const [clipCount, setClipCount] = useState(0)
+  useEffect(() => {
+    clipRef.current = []
+    setClipCount(0)
+  }, [p.projectId])
   const [fontTick, setFontTick] = useState(0)
   const stopAtRef = useRef<number | null>(null)
   const mounted = useRef(true)
@@ -572,6 +585,56 @@ export default function Editor(p: Props): React.JSX.Element {
     p.onError(null)
     commit(r.p)
   }
+  // --- копирование и вставка (Ctrl+C / X / V / D) ---
+  /** Выбрать вставленное: сами куски, а не их связанные субтитры (иначе справа открылась бы панель слов). */
+  const selectPasted = (pr: Project, ids: string[]): void => {
+    const main = ids.filter((id) => pr.items.find((i) => i.id === id)?.kind !== 'subs')
+    setSelected(main.length ? main : ids)
+    setSelectedClip(null)
+    setSubsSel(false)
+  }
+  const copySel = (): boolean => {
+    if (selected.length === 0) {
+      p.onError('Выдели куски, которые нужно скопировать')
+      return false
+    }
+    const entries = copyItems(projectRef.current, selected)
+    if (entries.length === 0) return false
+    clipRef.current = entries
+    setClipCount(entries.length)
+    p.onError(null)
+    flash(`Скопировано кусков: ${entries.filter((e) => e.item.kind !== 'subs').length}`)
+    return true
+  }
+  const cutSel = (): void => {
+    if (copySel()) del(false)
+  }
+  const pasteHere = (): void => {
+    if (clipRef.current.length === 0) {
+      p.onError('Буфер пуст: скопируй куски (Ctrl+C)')
+      return
+    }
+    const r = pasteItems(projectRef.current, clipRef.current, time)
+    if (r.ids.length === 0) {
+      p.onError('Файлов этих кусков в проекте больше нет — вставлять нечего')
+      return
+    }
+    p.onError(null)
+    commit(r.p)
+    selectPasted(r.p, r.ids)
+    flash(`Вставлено${r.skipped ? ` (пропущено: ${r.skipped} — файла нет в проекте)` : ''}`)
+  }
+  const duplicateSel = (): void => {
+    if (selected.length === 0) {
+      p.onError('Выдели куски, которые нужно продублировать')
+      return
+    }
+    const r = duplicateItems(projectRef.current, selected)
+    if (r.ids.length === 0) return
+    p.onError(null)
+    commit(r.p)
+    selectPasted(r.p, r.ids)
+  }
   // Ctrl+J: соединить выделенные куски обратно; не вышло — говорим почему
   const joinSel = (): void => {
     const r = joinSelected(projectRef.current, selected)
@@ -621,6 +684,14 @@ export default function Editor(p: Props): React.JSX.Element {
       if (ctrl && e.code === 'KeyW') {
         e.preventDefault()
         void cmds.close()
+        return
+      }
+      if (ctrl && !e.shiftKey && (e.code === 'KeyC' || e.code === 'KeyX' || e.code === 'KeyV' || e.code === 'KeyD')) {
+        e.preventDefault()
+        if (e.code === 'KeyC') copySel()
+        else if (e.code === 'KeyX') cutSel()
+        else if (e.code === 'KeyV') pasteHere()
+        else duplicateSel()
         return
       }
       if (ctrl && e.code === 'KeyJ') {
@@ -1018,6 +1089,10 @@ export default function Editor(p: Props): React.JSX.Element {
     cancelWork,
     freeze: freezeHere,
     addText: () => addTextHere(),
+    copy: copySel,
+    cut: cutSel,
+    paste: pasteHere,
+    duplicate: duplicateSel,
     addMarker: addMarkerHere,
     selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
     deselect: () => setSelected([]),
@@ -1031,7 +1106,7 @@ export default function Editor(p: Props): React.JSX.Element {
 
   const asrLabel = asrBusy || clipsBusy ? `${progress?.label ?? (clipsBusy ? 'Нарезка: готовлю' : 'Субтитры: готовлю')}${progress?.stage === 'asr' ? ` — ${Math.round(progress.value * 100)}%` : ''}` : null
   const status = saveError ? `Не сохранено: ${saveError}` : asrLabel ?? (exporting && progress ? progress.label : savedNote)
-  const stateKey = [asrBusy, clipsBusy, project.name, hist.past.length > 0, hist.future.length > 0, selected.length > 0, project.items.length > 0, duration, status, !!saveError].join('|')
+  const stateKey = [clipCount, asrBusy, clipsBusy, project.name, hist.past.length > 0, hist.future.length > 0, selected.length > 0, project.items.length > 0, duration, status, !!saveError].join('|')
   // eslint-disable-next-line react-hooks/rules-of-hooks
   useEffect(() => {
     p.onState({
@@ -1040,6 +1115,7 @@ export default function Editor(p: Props): React.JSX.Element {
       canRedo: hist.future.length > 0,
       hasSel: selected.length > 0,
       hasItems: project.items.length > 0,
+      canPaste: clipCount > 0,
       duration,
       status,
       statusErr: !!saveError,
@@ -1225,6 +1301,11 @@ export default function Editor(p: Props): React.JSX.Element {
           onClipOpen={enterFocus}
           onMessage={(m) => p.onError(m)}
           onDropEffect={(id, t) => applyEffect(t, id)}
+          canPaste={clipCount > 0}
+          onCopy={copySel}
+          onCut={cutSel}
+          onPaste={pasteHere}
+          onDuplicate={duplicateSel}
           focus={focusRange}
           fitTick={fitTick}
           zoomTick={zoomTick}
