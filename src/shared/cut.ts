@@ -227,7 +227,7 @@ export function cropProject(p: Project, a: number, b: number): Project {
     const s = Math.max(it.start, a)
     const e = Math.min(end, b)
     if (e - s < MIN_ITEM / 2) continue
-    if (it.kind === 'freeze') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)) })
+    if (it.kind === 'freeze' || it.kind === 'text') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)) })
     else items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)) })
   }
   return { ...p, items, markers: [], clips: [] }

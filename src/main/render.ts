@@ -9,9 +9,10 @@
  */
 import { BrowserWindow } from 'electron'
 import { spawn } from 'node:child_process'
-import { stat } from 'node:fs/promises'
+import { stat, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { join } from 'node:path'
+import type { Plate } from '../shared/plate'
 import { buildPhrases, captionAt, frameKey, type SubtitleStyle } from '../shared/timeline'
 import type { ProgressEvent, RenderFormat, RenderRequest, RenderResult, Word } from '../shared/types'
 import { FFMPEG } from './paths'
@@ -103,6 +104,21 @@ export async function openCaptionFrames(
       return buf
     }
   }
+}
+
+/** Одна текстовая плашка в PNG с прозрачностью (кадр W×H) — для вставки в экспорт. Окно то же, что у субтитров, одно на всё. */
+export async function renderPlatePng(plate: Plate, W: number, H: number, outPath: string): Promise<void> {
+  const w = getWindow()
+  const wc = w.webContents
+  const dbg = wc.debugger
+  await loadRenderPage(w)
+  await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false })
+  await dbg.sendCommand('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } })
+  await wc.executeJavaScript(`window.__plate(${JSON.stringify({ plate, W, H })})`)
+  const img = await wc.capturePage()
+  const size = img.getSize()
+  if (size.width !== W || size.height !== H) throw new Error(`Chromium отдал кадр ${size.width}×${size.height} вместо ${W}×${H}`)
+  await writeFile(outPath, img.toPNG())
 }
 
 const CRF: Record<RenderRequest['quality'], number> = { high: 14, medium: 18, small: 23 }

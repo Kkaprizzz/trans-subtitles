@@ -4,7 +4,8 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, canHaveEffects, insertFreeze, joinSelected, patchFrame } from '../../../shared/mix'
+import { addEffect, canHaveEffects, insertFreeze, insertText, joinSelected, patchFrame, patchPlate } from '../../../shared/mix'
+import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
 import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
@@ -72,6 +73,8 @@ export interface EditorCommands {
   cancelWork(): void
   /** разрезать по курсору и вставить стоп-кадр (Shift+S) */
   freeze(): void
+  /** поставить надпись на курсор */
+  addText(): void
   /** поставить метку на курсоре */
   addMarker(): void
   selectAll(): void
@@ -172,7 +175,8 @@ const I = {
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2.2.3-1.3-1.3L17 4.8 14 4l-1 2h-2l-1-2-3 .8.5 2.2-1.3 1.3L5 8l-1 3 2 1v0l-2 1 1 3 2.2-.3 1.3 1.3L7 19.2l3 .8 1-2h2l1 2 3-.8-.5-2.2 1.3-1.3 2.2.3 1-3z',
   out: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6',
-  freeze: 'M4 5h16v14H4zM10 9v6M14 9v6'
+  freeze: 'M4 5h16v14H4zM10 9v6M14 9v6',
+  text: 'M5 6h14M12 6v13M9 19h6'
 }
 
 export default function Editor(p: Props): React.JSX.Element {
@@ -199,7 +203,7 @@ export default function Editor(p: Props): React.JSX.Element {
   const [asrBusy, setAsrBusy] = useState(false)
   // «Нарезка»: выбранная рамка, фокус на рамке, окошко и ход работы
   const [selectedClip, setSelectedClip] = useState<string | null>(null)
-  const [leftTab, setLeftTab] = useState<'media' | 'fx'>('media')
+  const [leftTab, setLeftTab] = useState<'media' | 'fx' | 'text'>('media')
   const [focusClipId, setFocusClipId] = useState<string | null>(null)
   const [clipsOpen, setClipsOpen] = useState(false)
   const [clipsBusy, setClipsBusy] = useState(false)
@@ -292,6 +296,11 @@ export default function Editor(p: Props): React.JSX.Element {
   const frameItemId = useMemo(() => {
     const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
     return it && canHaveEffects(project, it) ? it.id : null
+  }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
+  // выделенная надпись: в превью её можно таскать
+  const plateItemId = useMemo(() => {
+    const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
+    return it?.kind === 'text' ? it.id : null
   }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
   const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
@@ -535,6 +544,14 @@ export default function Editor(p: Props): React.JSX.Element {
       p.onError(r.error)
       return
     }
+    p.onError(null)
+    commit(r.p)
+    setSelected([r.id])
+    setSelectedClip(null)
+  }
+  /** Ставит надпись на курсор (3 с) на самую верхнюю свободную видеодорожку; styleId — готовый стиль. */
+  const addTextHere = (styleId = 'text'): void => {
+    const r = insertText(projectRef.current, time, styleId)
     p.onError(null)
     commit(r.p)
     setSelected([r.id])
@@ -1000,6 +1017,7 @@ export default function Editor(p: Props): React.JSX.Element {
     join: joinSel,
     cancelWork,
     freeze: freezeHere,
+    addText: () => addTextHere(),
     addMarker: addMarkerHere,
     selectAll: () => setSelected(projectRef.current.items.map((i) => i.id)),
     deselect: () => setSelected([]),
@@ -1052,6 +1070,7 @@ export default function Editor(p: Props): React.JSX.Element {
         tab={leftTab}
         onTab={setLeftTab}
         onEffect={(t) => applyEffect(t)}
+        onText={addTextHere}
       />
 
       <section className="ed-center">
@@ -1069,6 +1088,8 @@ export default function Editor(p: Props): React.JSX.Element {
           onEditCancel={() => setEditWord(null)}
           clipView={clipView}
           frameItemId={frameItemId}
+          plateItemId={plateItemId}
+          onPlateDrag={(id, patch: Partial<Plate>) => commit(patchPlate(projectRef.current, id, patch), `pld-${id}`)}
           onFrameDrag={(id, patch) => commit(patchFrame(projectRef.current, id, patch), `frd-${id}`)}
           onOffset={focusClip ? (v) => commit(patchClip(projectRef.current, focusClip.id, { offsetX: v }), `co-${focusClip.id}`) : undefined}
         />
@@ -1141,6 +1162,9 @@ export default function Editor(p: Props): React.JSX.Element {
           </button>
           <button className="btn ghost" onClick={freezeHere} disabled={project.items.length === 0} title="Разрезать по курсору и вставить стоп-кадр на 3 с (Shift+S)">
             <Icon d={I.freeze} /> Стоп-кадр
+          </button>
+          <button className="btn ghost" onClick={() => addTextHere()} title="Поставить надпись на курсор на 3 с">
+            <Icon d={I.text} /> Текст
           </button>
           <button className="btn ghost" onClick={() => del(false)} disabled={selected.length === 0} title="Удалить выделенное, дыра остаётся (Delete). Shift+Delete — удалить и закрыть дыру">
             <Icon d={I.del} /> Удалить

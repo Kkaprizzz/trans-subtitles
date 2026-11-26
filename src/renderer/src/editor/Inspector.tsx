@@ -2,9 +2,11 @@
 import { memo, useState } from 'react'
 import { deleteClip, patchClip, placement } from '../../../shared/cut'
 import { EFFECTS } from '../../../shared/effects'
+import { FONTS, fontById } from '../../../shared/fonts'
 import { FRAME_LIMITS, isDefaultFrame, type Frame, type FrameKey } from '../../../shared/frame'
-import { canHaveEffects, clampSpeed, patchEffect, patchFrame, removeEffect, resetFrame, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
-import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
+import { MAX_PLATE_TEXT, PLATE_LIMITS, type Plate } from '../../../shared/plate'
+import { canHaveEffects, clampSpeed, patchEffect, patchFrame, patchPlate, removeEffect, resetFrame, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
+import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, trimItem, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
 
@@ -345,11 +347,162 @@ function FrameBlock(p: { project: Project; item: Item; onCommit(next: Project, k
   )
 }
 
+/** Числовое поле с ползунком: правка по Enter/уходу из поля, ползунок — сразу. */
+function NumField(p: { title: string; value: number; lo: number; hi: number; step?: number; onChange(v: number, live: boolean): void }): React.JSX.Element {
+  const [text, setText] = useState(String(p.value))
+  const [seen, setSeen] = useState(p.value)
+  if (seen !== p.value) {
+    setSeen(p.value)
+    setText(String(p.value))
+  }
+  return (
+    <label className="frame-field">
+      <span>{p.title}</span>
+      <input type="range" min={p.lo} max={p.hi} step={p.step ?? 1} value={p.value} onChange={(e) => p.onChange(Number(e.target.value), true)} aria-label={p.title} />
+      <input
+        type="text"
+        inputMode="decimal"
+        className="mono"
+        value={text}
+        aria-label={`${p.title}, число`}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          const v = Number(text.replace(',', '.'))
+          if (!Number.isFinite(v)) setText(String(p.value))
+          else if (v !== p.value) p.onChange(v, false)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          e.stopPropagation()
+        }}
+      />
+    </label>
+  )
+}
+
+/** Панель надписи: текст, шрифт, размер, цвет, выравнивание, обводка, тень, положение и ширина, длительность. */
+function TextPanel(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element | null {
+  const pl = p.item.plate
+  const [lenText, setLenText] = useState(String(Math.round(itemDur(p.item) * 100) / 100))
+  const [lenSeen, setLenSeen] = useState(itemDur(p.item))
+  if (!pl) return null
+  if (lenSeen !== itemDur(p.item)) {
+    setLenSeen(itemDur(p.item))
+    setLenText(String(Math.round(itemDur(p.item) * 100) / 100))
+  }
+  const id = p.item.id
+  const patch = (x: Partial<Plate>, key?: string): void => p.onCommit(patchPlate(p.project, id, x), key)
+  const font = fontById(pl.font)
+  return (
+    <aside className="inspector">
+      <div className="pane-head">
+        <span>Надпись</span>
+      </div>
+      <div className="insp-body">
+        <label className="insp-col">
+          <span>Текст</span>
+          <textarea rows={3} value={pl.text} maxLength={MAX_PLATE_TEXT} onChange={(e) => patch({ text: e.target.value }, `pt-${id}`)} onKeyDown={(e) => e.stopPropagation()} />
+        </label>
+        <div className="insp-col">
+          <span>Длительность, с</span>
+          <div className="speed-row">
+            <input
+              type="text"
+              inputMode="decimal"
+              className="mono"
+              value={lenText}
+              aria-label="Длительность надписи, секунды"
+              onChange={(e) => setLenText(e.target.value)}
+              onBlur={() => {
+                const v = Number(lenText.replace(',', '.'))
+                if (!Number.isFinite(v) || v <= 0) setLenText(String(Math.round(itemDur(p.item) * 100) / 100))
+                else p.onCommit(trimItem(p.project, id, 'end', p.item.start + v))
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                e.stopPropagation()
+              }}
+            />
+          </div>
+        </div>
+        <label className="insp-row">
+          <span>Шрифт</span>
+          <select
+            value={pl.font}
+            onChange={(e) => {
+              const f = fontById(e.target.value)
+              patch({ font: f.id, weight: f.weights.includes(pl.weight) ? pl.weight : (f.weights.find((w) => w >= pl.weight) ?? f.weights[f.weights.length - 1]) })
+            }}
+          >
+            {FONTS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="insp-row">
+          <span>Начертание</span>
+          <select value={pl.weight} onChange={(e) => patch({ weight: Number(e.target.value) })}>
+            {font.weights.map((w) => (
+              <option key={w} value={w}>
+                {w}
+              </option>
+            ))}
+          </select>
+        </label>
+        <NumField title="Размер, %" value={pl.size} lo={PLATE_LIMITS.size[0]} hi={PLATE_LIMITS.size[1]} step={0.5} onChange={(v, live) => patch({ size: v }, live ? `ps-${id}` : undefined)} />
+        <label className="insp-row">
+          <span>Цвет</span>
+          <input type="color" value={pl.color} onChange={(e) => patch({ color: e.target.value }, `pc-${id}`)} />
+        </label>
+        <div className="insp-col">
+          <span>Выравнивание</span>
+          <div className="seg" role="radiogroup" aria-label="Выравнивание текста">
+            {(['left', 'center', 'right'] as const).map((a) => (
+              <button key={a} role="radio" aria-checked={pl.align === a} className={pl.align === a ? 'on' : ''} onClick={() => patch({ align: a })}>
+                {a === 'left' ? 'Слева' : a === 'center' ? 'По центру' : 'Справа'}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={pl.strokeOn} onChange={(e) => patch({ strokeOn: e.target.checked })} />
+          <span>Обводка</span>
+        </label>
+        {pl.strokeOn && (
+          <>
+            <label className="insp-row">
+              <span>Цвет обводки</span>
+              <input type="color" value={pl.strokeColor} onChange={(e) => patch({ strokeColor: e.target.value }, `psc-${id}`)} />
+            </label>
+            <NumField title="Толщина, %" value={pl.stroke} lo={PLATE_LIMITS.stroke[0]} hi={PLATE_LIMITS.stroke[1]} onChange={(v, live) => patch({ stroke: v }, live ? `pst-${id}` : undefined)} />
+          </>
+        )}
+        <label className="check">
+          <input type="checkbox" checked={pl.shadowOn} onChange={(e) => patch({ shadowOn: e.target.checked })} />
+          <span>Тень</span>
+        </label>
+        {pl.shadowOn && (
+          <label className="insp-row">
+            <span>Цвет тени</span>
+            <input type="color" value={pl.shadowColor} onChange={(e) => patch({ shadowColor: e.target.value }, `pshc-${id}`)} />
+          </label>
+        )}
+        <NumField title="Положение X, %" value={pl.x} lo={PLATE_LIMITS.x[0]} hi={PLATE_LIMITS.x[1]} onChange={(v, live) => patch({ x: v }, live ? `px-${id}` : undefined)} />
+        <NumField title="Положение Y, %" value={pl.y} lo={PLATE_LIMITS.y[0]} hi={PLATE_LIMITS.y[1]} onChange={(v, live) => patch({ y: v }, live ? `py-${id}` : undefined)} />
+        <NumField title="Ширина, %" value={pl.width} lo={PLATE_LIMITS.width[0]} hi={PLATE_LIMITS.width[1]} onChange={(v, live) => patch({ width: v }, live ? `pw-${id}` : undefined)} />
+      </div>
+    </aside>
+  )
+}
+
 function Inspector(p: Props): React.JSX.Element {
   const pr = p.project
   if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
   const one = p.selected.length === 1 ? pr.items.find((i) => i.id === p.selected[0]) : undefined
   const m = one ? mediaOf(pr, one.mediaId) : undefined
+  if (one && one.kind === 'text') return <TextPanel key={one.id} project={pr} item={one} onCommit={p.onCommit} onMessage={p.onMessage} />
 
   if (one && m) {
     const track = trackOf(pr, one.trackId)

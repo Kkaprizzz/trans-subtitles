@@ -5,6 +5,7 @@
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
 import { clampParam, EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
 import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
+import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
 import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project } from './project.ts'
 
 const EPS = 0.02
@@ -298,6 +299,7 @@ export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FR
     gain: [],
     effects: [],
     frame: { ...DEFAULT_FRAME },
+    plate: null,
     link: null
   }
   return { p: finish({ ...cur, items: [...cur.items, fz] }), id: fz.id }
@@ -370,4 +372,40 @@ export function patchFrame(p: Project, itemId: string, patch: Partial<Frame>, pr
 
 export function resetFrame(p: Project, itemId: string): Project {
   return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, frame: { ...DEFAULT_FRAME } } : i)) }
+}
+
+// --- текстовые плашки ---
+
+/**
+ * Ставит надпись на время `at` длиной len на самую верхнюю свободную видеодорожку (нет места — новая сверху).
+ * styleId — один из PLATE_STYLES; text — своё содержимое.
+ */
+export function insertText(p: Project, at: number, styleId = 'text', len = DEFAULT_PLATE_LEN, text = 'Текст'): { p: Project; id: string } {
+  // начало округляется вниз: надпись, поставленная на курсор, сразу видна в этом кадре
+  const start = Math.max(0, Math.floor(at * 1000 + 1e-6) / 1000)
+  const top = p.tracks.find((t) => t.kind === 'video' && !t.locked)
+  const placed = placeFree(p, 'video', start, start + len, top?.id)
+  const it: Item = {
+    id: uid('i'),
+    kind: 'text',
+    mediaId: '',
+    trackId: placed.id,
+    start,
+    in: 0,
+    out: r3(len),
+    audio: false,
+    speed: 1,
+    volume: 1,
+    gain: [],
+    effects: [],
+    frame: { ...DEFAULT_FRAME },
+    plate: newPlate(styleId, text),
+    link: null
+  }
+  return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }
+}
+
+/** Меняет параметры надписи (числа зажимаются в пределы). */
+export function patchPlate(p: Project, id: string, patch: Partial<Plate>): Project {
+  return { ...p, items: p.items.map((i) => (i.id === id && i.kind === 'text' && i.plate && !locked(p, i) ? { ...i, plate: patchPlateValues(i.plate, patch) } : i)) }
 }

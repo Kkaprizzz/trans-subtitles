@@ -11,6 +11,7 @@
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { gainAt } from '../../../shared/audio'
 import { EFFECT_MIME, EFFECTS, type EffectType } from '../../../shared/effects'
+import { plateLabel } from '../../../shared/plate'
 import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, insertFreeze, joinWithNeighbor, moveGainPoint, setBaseVolume, setFreezeLength } from '../../../shared/mix'
 import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
@@ -882,6 +883,7 @@ function Tracks(p: Props): React.JSX.Element {
           const m = mediaOf(p.project, it.mediaId)
           const isSubs = it.kind === 'subs'
           const isFreeze = it.kind === 'freeze'
+          const isText = it.kind === 'text'
           const onVideoTrack = row.track.kind === 'video'
           const isVideo = !isSubs && onVideoTrack && !!m?.hasVideo
           const sel = p.selected.includes(it.id)
@@ -891,9 +893,9 @@ function Tracks(p: Props): React.JSX.Element {
           const sound = hasSound(p.project, it)
           // у видеокуска картинка сверху, звук — узкой полосой под ней; у звукового куска всё в одном
           const picH = onVideoTrack ? PIC_H : row.h
-          const cls = `tr-item ${isSubs ? 'subs' : isVideo ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
+          const cls = `tr-item ${isSubs ? 'subs' : isVideo || isText ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${isText ? ' text' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
           const fxNames = it.effects.filter((e) => e.on).map((e) => EFFECTS[e.type].title.toLowerCase())
-          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : (m?.name ?? '—')
+          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : isText && it.plate ? plateLabel(it.plate) : (m?.name ?? '—')
           const srcFrom = tlToSrc(it, visFrom)
           const srcTo = tlToSrc(it, visTo)
           const itemMenu = (e: React.MouseEvent): void => openMenu(e, (x, t, y) => ({ kind: 'item', x, y, itemId: it.id, t }), it)

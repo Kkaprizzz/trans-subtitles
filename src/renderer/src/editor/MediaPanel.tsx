@@ -1,6 +1,7 @@
 /** Панель «Медиа»: файлы проекта с миниатюрами. Тащи на таймлайн или дважды щёлкни — в конец основной дорожки. */
 import { memo } from 'react'
 import { EFFECT_MIME, EFFECT_TYPES, EFFECTS, type EffectType } from '../../../shared/effects'
+import { PLATE_STYLES } from '../../../shared/plate'
 import type { MediaRef } from '../../../shared/project'
 import { fmtTime } from '../format'
 import { MEDIA_MIME } from './Tracks'
@@ -15,8 +16,10 @@ interface Props {
   onImport(): void
   onAppend(id: string): void
   onRemove(id: string): void
-  tab: 'media' | 'fx'
-  onTab(t: 'media' | 'fx'): void
+  tab: 'media' | 'fx' | 'text'
+  onTab(t: 'media' | 'fx' | 'text'): void
+  /** щелчок по карточке стиля надписи: поставить на курсор */
+  onText(styleId: string): void
   /** щелчок по карточке эффекта: наложить на выделенные куски */
   onEffect(t: EffectType): void
 }
@@ -32,6 +35,9 @@ function MediaPanel(p: Props): React.JSX.Element {
           <button role="tab" aria-selected={p.tab === 'fx'} className={p.tab === 'fx' ? 'on' : ''} onClick={() => p.onTab('fx')}>
             Эффекты
           </button>
+          <button role="tab" aria-selected={p.tab === 'text'} className={p.tab === 'text' ? 'on' : ''} onClick={() => p.onTab('text')}>
+            Текст
+          </button>
         </div>
         {p.tab === 'media' && (
           <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
@@ -39,6 +45,21 @@ function MediaPanel(p: Props): React.JSX.Element {
           </button>
         )}
       </div>
+      {p.tab === 'text' && (
+        <ul className="fx-list">
+          {PLATE_STYLES.map((st) => (
+            <li key={st.id} className="fx-card" onClick={() => p.onText(st.id)} title="Щёлкни — поставить надпись на курсор">
+              <span className="fx-swatch text-sw" style={{ fontWeight: st.plate.weight, WebkitTextStroke: st.plate.strokeOn ? '1px #000' : undefined }}>
+                Аа
+              </span>
+              <span className="fx-meta">
+                <span className="fx-name">{st.title}</span>
+                <span className="dim">{st.description}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {p.tab === 'fx' && (
         <ul className="fx-list">
           {EFFECT_TYPES.map((t) => (

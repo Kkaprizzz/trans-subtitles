@@ -1821,3 +1821,19 @@ textarea {
   outline: none;
   border-color: var(--accent);
 }
+
+/* надпись в кадре предпросмотра */
+.pl-plate {
+  user-select: none;
+}
+
+.tr-item.text {
+  background: #4d3d1c;
+}
+.fx-swatch.text-sw {
+  display: grid;
+  place-items: center;
+  background: #1c1c1f;
+  color: #fff;
+  font-size: 16px;
+}

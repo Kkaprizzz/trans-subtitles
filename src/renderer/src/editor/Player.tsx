@@ -10,6 +10,8 @@ import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
 import { gainAt } from '../../../shared/audio'
 import { cssFilter } from '../../../shared/effects'
 import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
+import type { Plate } from '../../../shared/plate'
+import { fillPlate, loadPlateFont } from '../plateDom'
 import { activeAt, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
 import { buildPhrases, captionAt, DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import { createCaptionView, setupStage, type CaptionView } from '../caption'
@@ -38,6 +40,9 @@ interface Props {
   /** выделенный кусок, у которого можно двигать и масштабировать кадр мышью в превью (null — нет) */
   frameItemId?: string | null
   onFrameDrag?(id: string, patch: Partial<Frame>): void
+  /** выделенная надпись: её можно таскать мышью в превью */
+  plateItemId?: string | null
+  onPlateDrag?(id: string, patch: Partial<Plate>): void
 }
 
 /** z-index слоя по положению дорожки: выше дорожка — выше слой. */
@@ -90,6 +95,54 @@ function CaptionLayer(p: CaptionLayerProps): React.JSX.Element {
   }, [caption])
 
   return <div className="pl-captions" ref={hostRef} style={{ zIndex: p.z }} />
+}
+
+/** Одна надпись в кадре: рисуется тем же кодом, что и в экспорте; выделенную можно таскать. */
+function PlateView(p: { item: Item; z: number; W: number; H: number; selected: boolean; onDrag?(patch: Partial<Plate>): void }): React.JSX.Element | null {
+  const plate = p.item.plate
+  const ref = useRef<HTMLDivElement>(null)
+  const [tick, setTick] = useState(0)
+  const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null)
+  useEffect(() => {
+    if (!plate) return
+    let alive = true
+    void loadPlateFont(plate).then(() => alive && setTick((n) => n + 1))
+    return () => {
+      alive = false
+    }
+  }, [plate?.font, plate?.weight, plate?.text]) // eslint-disable-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || !plate) return
+    fillPlate(el, plate, p.W, p.H)
+    el.style.zIndex = String(p.z)
+    if (p.selected && p.onDrag) {
+      el.style.pointerEvents = 'auto'
+      el.style.cursor = 'move'
+      el.style.outline = '1.5px solid var(--accent)'
+      el.style.touchAction = 'none'
+    }
+  }, [plate, p.W, p.H, p.z, p.selected, tick]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!plate) return null
+  return (
+    <div
+      ref={ref}
+      className="pl-plate"
+      onPointerDown={(e) => {
+        if (!p.selected || !p.onDrag || e.button !== 0) return
+        e.stopPropagation()
+        ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+        drag.current = { x: e.clientX, y: e.clientY, px: plate.x, py: plate.y }
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current
+        if (!d || !p.onDrag) return
+        p.onDrag({ x: d.px + ((e.clientX - d.x) / p.W) * 100, y: d.py + ((e.clientY - d.y) / p.H) * 100 })
+      }}
+      onPointerUp={() => (drag.current = null)}
+      onPointerCancel={() => (drag.current = null)}
+    />
+  )
 }
 
 const PRELOAD = 2
@@ -350,6 +403,19 @@ export default function Player(p: Props): React.JSX.Element {
         }}
       >
         {cv?.mode === 'fit-blur' && <canvas ref={bgRef} className="pl-bg" width={54} height={96} />}
+        {activeAt(p.project, p.time)
+          .filter((i) => i.kind === 'text' && !hidden.has(i.trackId))
+          .map((i) => (
+            <PlateView
+              key={i.id}
+              item={i}
+              z={layerZ(trackOrder.get(i.trackId) ?? 0)}
+              W={frameW}
+              H={frameH}
+              selected={p.plateItemId === i.id}
+              onDrag={p.onPlateDrag ? (patch) => p.onPlateDrag?.(i.id, patch) : undefined}
+            />
+          ))}
         {selBox && p.onFrameDrag && (
           <div
             className="pl-sel"

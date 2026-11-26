@@ -37,7 +37,7 @@ export default function App(): React.JSX.Element {
         canvas: m.width && m.height ? { w: Math.floor(m.width / 2) * 2, h: Math.floor(m.height / 2) * 2 } : null,
         fps: m.fps && m.fps >= 1 ? m.fps : 30,
         media: [{ id: 'mdev', path: m.path, name: m.name, duration: m.duration, hasVideo: m.hasVideo, hasAudio: m.hasAudio, width: m.width, height: m.height, fps: m.fps, videoCodec: m.videoCodec, needsPreview: m.needsPreview }],
-        items: [{ id: 'idev', kind: 'media', mediaId: 'mdev', trackId: pr.tracks.filter((t) => t.kind === 'video').at(-1)!.id, start: 0, in: 0, out: m.duration, audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { scale: 100, x: 0, y: 0, cl: 0, cr: 0, ct: 0, cb: 0 }, link: null }]
+        items: [{ id: 'idev', kind: 'media', mediaId: 'mdev', trackId: pr.tracks.filter((t) => t.kind === 'video').at(-1)!.id, start: 0, in: 0, out: m.duration, audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { scale: 100, x: 0, y: 0, cl: 0, cr: 0, ct: 0, cb: 0 }, plate: null, link: null }]
       })
       setProjectId(pr.id)
     })
@@ -148,6 +148,7 @@ export default function App(): React.JSX.Element {
         'sep',
         { label: 'Разрезать', shortcut: 'S', disabled: !ed?.hasItems, action: () => c()?.split() },
         { label: 'Стоп-кадр', shortcut: 'Shift+S', disabled: !ed?.hasItems, action: () => c()?.freeze() },
+        { label: 'Текст', disabled: !inEditor, action: () => c()?.addText() },
         { label: 'Удалить', shortcut: 'Delete', disabled: !ed?.hasSel, action: () => c()?.del() },
         { label: 'Удалить и закрыть дыру', shortcut: 'Shift+Delete', disabled: !ed?.hasSel, action: () => c()?.delRipple() },
         { label: 'Соединить куски', shortcut: 'Ctrl+J', disabled: !ed?.hasSel, action: () => c()?.join() },

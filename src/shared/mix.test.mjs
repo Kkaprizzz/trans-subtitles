@@ -6,6 +6,9 @@ import { insertFreeze, setFreezeLength, addEffect, patchEffect, removeEffect, ca
 import { effectFilters, blurSigma, sameEffects, cleanEffects, cssFilter, newEffect, EFFECT_TYPES, clampParam } from './effects.ts'
 import { cleanFrame, DEFAULT_FRAME, frameFilters, frameRect, isDefaultFrame, fitSize, patchFrameValues, sameFrame } from './frame.ts'
 import { patchFrame, resetFrame } from './mix.ts'
+import { insertText, patchPlate } from './mix.ts'
+import { PLATE_STYLES, cleanPlate, newPlate, plateLabel, patchPlateValues } from './plate.ts'
+import { FONTS } from './fonts.ts'
 import { cropProject, orderedClips, placement, makeClip, sourceAt } from './cut.ts'
 import { setSpeed, clampSpeed } from './mix.ts'
 import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, itemGainAt, joinItems, joinSelected, joinWithNeighbor, moveGainPoint, neighbors, setBaseVolume } from './mix.ts'
@@ -231,7 +234,7 @@ for (const it of v5.items) {
   it.volume = 0.5
 }
 const mig = sanitizeProject(v5)
-assert.equal(mig.version, 9)
+assert.equal(mig.version, 10)
 const mv = mig.items.find((i) => i.mediaId === ma)
 assert.deepEqual([mv.audio, mv.volume, mv.gain], [true, 0.5, []], 'звук прикреплён, уровень сохранён')
 assert.equal(mig.items.find((i) => i.mediaId === mus).audio, true)
@@ -363,7 +366,7 @@ void subsOf
   // сохранение и миграция
   const saved = sanitizeProject(JSON.parse(JSON.stringify(at2.p)))
   assert.equal(saved.items.find((i) => i.id === a1.id).speed, 2)
-  assert.equal(saved.version, 9)
+  assert.equal(saved.version, 10)
   const v6 = JSON.parse(JSON.stringify(q))
   v6.version = 6
   for (const it of v6.items) delete it.speed
@@ -503,9 +506,9 @@ void subsOf
 
   // сохранение и миграция
   const saved = sanitizeProject(JSON.parse(JSON.stringify(e1.p)))
-  assert.equal(saved.version, 9)
+  assert.equal(saved.version, 10)
   assert.equal(saved.items.find((i) => i.kind === 'freeze').effects[0].type, 'blur')
-  assert.equal(saved.version, 9)
+  assert.equal(saved.version, 10)
   const v7 = JSON.parse(JSON.stringify(q))
   v7.version = 7
   for (const it of v7.items) delete it.effects
@@ -584,7 +587,7 @@ void subsOf
   const fzF = insertFreeze(q1, a1.id, 5)
   assert.ok(sameFrame(fzF.p.items.find((i) => i.id === fzF.id).frame, DEFAULT_FRAME), 'стоп-кадр с кадром по умолчанию')
   const rt = sanitizeProject(JSON.parse(JSON.stringify(q1)))
-  assert.equal(rt.version, 9)
+  assert.equal(rt.version, 10)
   assert.equal(rt.items[0].frame.scale, 50)
   const v8 = JSON.parse(JSON.stringify(q1))
   v8.version = 8
@@ -592,6 +595,90 @@ void subsOf
   const mig8 = sanitizeProject(v8)
   assert.ok(isDefaultFrame(mig8.items[0].frame), 'v8: кадр по умолчанию')
   assert.equal(mig8.items[0].effects[0].values.strength, 70, 'v8: блюр переехал без потерь')
+}
+
+// === текстовые плашки ===
+{
+  assert.deepEqual(PLATE_STYLES.map((x) => x.id), ['title', 'caption', 'text'])
+  let q = newProject('Т')
+  q = addMedia(q, V('/a.mp4', 20)).p
+  const [qa] = q.media.map((m) => m.id)
+  const a1 = insertMedia(q, qa, 0)
+  q = a1.p
+  const baseTracks = q.tracks.filter((t) => t.kind === 'video').length
+  const t1 = insertText(q, 5, 'title')
+  const tx = t1.p.items.find((i) => i.id === t1.id)
+  assert.deepEqual([tx.kind, tx.mediaId, tx.start, tx.in, tx.out], ['text', '', 5, 0, 3])
+  assert.equal(tx.plate.size, 8, 'стиль «Заголовок»')
+  assert.equal(tx.plate.strokeOn, true)
+  assert.equal(tx.trackId, t1.p.tracks.filter((t) => t.kind === 'video')[0].id, 'на самой верхней свободной видеодорожке')
+  // верхняя занята надписью в то же время — вторая идёт на другую свободную, а при нехватке — на новую сверху
+  const t2 = insertText(t1.p, 5, 'caption')
+  const tx2 = t2.p.items.find((i) => i.id === t2.id)
+  assert.notEqual(tx2.trackId, tx.trackId)
+  const t3 = insertText(t2.p, 5, 'text')
+  const t4 = insertText(t3.p, 5, 'text')
+  assert.ok(t4.p.tracks.filter((t) => t.kind === 'video').length > baseTracks, 'нет места — новая дорожка')
+  assert.equal(t4.p.tracks[0].id, t4.p.items.find((i) => i.id === t4.id).trackId, 'новая — сверху')
+  assert.equal(projectDuration(t1.p), 20)
+  // параметры
+  const edited = patchPlate(t1.p, t1.id, { size: 999, x: -10, width: 1, text: 'а\nб', color: '#ff0000' })
+  const ep = edited.items.find((i) => i.id === t1.id).plate
+  assert.deepEqual([ep.size, ep.x, ep.width, ep.text, ep.color], [40, 0, 10, 'а\nб', '#ff0000'], 'зажато в пределы')
+  assert.equal(plateLabel(ep), 'а')
+  assert.equal(patchPlate(setTrack(t1.p, tx.trackId, { locked: true }), t1.id, { size: 3 }).items.find((i) => i.id === t1.id).plate.size, 8, 'закреплённая дорожка — не правим')
+  assert.deepEqual(patchPlate(t1.p, a1.id, { size: 3 }).items, t1.p.items, 'у видео надписи нет — ничего не меняется')
+  assert.equal(patchPlateValues(newPlate('text'), { text: 'x'.repeat(9999) }).text.length, 600)
+  // края: свободны, длина = out; нельзя пересечь соседа
+  const tr = trimItem(t1.p, t1.id, 'end', 12)
+  assert.deepEqual([tr.items.find((i) => i.id === t1.id).start, tr.items.find((i) => i.id === t1.id).out], [5, 7])
+  const trs = trimItem(t1.p, t1.id, 'start', 4)
+  assert.deepEqual([trs.items.find((i) => i.id === t1.id).start, trs.items.find((i) => i.id === t1.id).out], [4, 4], 'начало левее — надпись длиннее, конец на месте')
+  assert.equal(trimItem(t1.p, t1.id, 'end', 5.01).items.find((i) => i.id === t1.id).out >= 0.1, true)
+  // резка и перенос
+  const sp = splitItem(t1.p, t1.id, 6)
+  const [l, r] = [sp.p.items.find((i) => i.id === t1.id), sp.p.items.find((i) => i.id === sp.id)]
+  assert.deepEqual([l.start, l.out, r.start, r.out], [5, 1, 6, 2])
+  assert.deepEqual(l.plate, r.plate)
+  const mv = moveItem(t1.p, t1.id, tx.trackId, 12)
+  assert.equal(mv.items.find((i) => i.id === t1.id).start, 12)
+  // склейка надписей не поддерживается; звук/эффекты/кадр к ним неприменимы
+  assert.ok(joinItems(sp.p, t1.id, sp.id).error)
+  assert.equal(canHaveEffects(t1.p, tx), false)
+  assert.equal(addEffect(t1.p, [t1.id], 'blur').added, 0)
+  assert.equal(hasSound(t1.p, tx), false)
+  // рамка клипа и кроп проекта: надпись внутри обрезается и сдвигается
+  const cp = cropProject(t1.p, 6, 12)
+  const ct = cp.items.find((i) => i.kind === 'text')
+  assert.deepEqual([ct.start, ct.in, ct.out], [0, 0, 2], 'надпись 5–8 урезана до 6–8 и сдвинута к нулю')
+  // экспорт: картинка надписи в своём слое над видео
+  const og = { W: 1280, H: 720, fps: 25, format: 'h264', quality: 'medium', subLayers: [], textLayers: [{ trackId: tx.trackId, path: '/tmp/p0.png', start: 5, end: 8 }] }
+  const c = buildExport(t1.p, og, '/o.mp4')
+  const g = c.args[c.args.indexOf('-filter_complex') + 1]
+  const ip = c.args.indexOf('/tmp/p0.png')
+  assert.deepEqual(c.args.slice(ip - 7, ip + 1), ['-loop', '1', '-framerate', '25', '-t', '3.000', '-i', '/tmp/p0.png'].slice(0, 8), 'вход картинки: -loop 1 -framerate -t')
+  assert.match(g, /\[1:v\]format=rgba,setpts=PTS-STARTPTS\+5\.000\/TB\[x1\]/)
+  assert.ok(g.indexOf('[0:v]') < g.indexOf('[x1]') && g.indexOf("overlay=x=0:y=0:format=auto:eof_action=pass:enable='between(t,5.000,8.000)'") > g.indexOf('[v0]'), 'надпись выше видео')
+  const hidden = buildExport(setTrack(t1.p, tx.trackId, { hidden: true }), og, '/o.mp4')
+  assert.ok(!hidden.args.includes('/tmp/p0.png'), 'скрытая дорожка скрывает надпись')
+  // сохранение и миграция
+  const rt = sanitizeProject(JSON.parse(JSON.stringify(edited)))
+  assert.equal(rt.version, 10)
+  const rtx = rt.items.find((i) => i.kind === 'text')
+  assert.deepEqual([rtx.mediaId, rtx.plate.text, rtx.plate.size], ['', 'а\nб', 40])
+  const v9 = JSON.parse(JSON.stringify(q))
+  v9.version = 9
+  for (const it of v9.items) delete it.plate
+  const m9 = sanitizeProject(v9)
+  assert.ok(m9.items.every((i) => i.plate === null), 'v9: надписей нет')
+  const bad = JSON.parse(JSON.stringify(t1.p))
+  bad.items.find((i) => i.kind === 'text').plate = { text: 5, font: 'нет', weight: 'x', size: 'y', color: 'red', align: 'wow' }
+  const bp = sanitizeProject(bad).items.find((i) => i.kind === 'text').plate
+  assert.deepEqual([bp.font, bp.color, bp.align, bp.size, bp.weight], ['commissioner', '#ffffff', 'center', 6, 700], 'мусор — по стилю «Текст»')
+  const onAudio = JSON.parse(JSON.stringify(t1.p))
+  onAudio.items.find((i) => i.kind === 'text').trackId = onAudio.tracks.find((t) => t.kind === 'audio').id
+  assert.ok(!sanitizeProject(onAudio).items.some((i) => i.kind === 'text'), 'надпись на звуковой дорожке выброшена')
+  assert.equal(cleanPlate({ font: 'prata', weight: 400 }, FONTS.map((f) => f.id)).font, 'prata')
 }
 
 console.log('mix.ts, audio.ts: все проверки прошли')

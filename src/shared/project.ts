@@ -1,5 +1,6 @@
 /**
- * Модель проекта монтажки (формат v9).
+ * Модель проекта монтажки (формат v10).
+ * Надпись — кусок вида 'text' на видеодорожке: mediaId пустой, in = 0, out = длина, параметры в plate.
  * Кадр куска (frame): масштаб, положение и кроп картинки; эффекты (effects) — список с параметрами.
  * Стоп-кадр — кусок вида 'freeze': in — секунда файла, кадр которой показывается, out = in + длина; звука у него нет.
  * Скорость куска (speed, 0.25–4): на таймлайне он занимает (out − in) ÷ speed секунд; in/out — всегда секунды файла. Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
@@ -15,7 +16,9 @@
  */
 import { cleanPoints, splitGain, type GainPoint } from './audio.ts'
 import { cleanEffects, type Effect } from './effects.ts'
+import { FONTS } from './fonts.ts'
 import { cleanFrame, DEFAULT_FRAME, type Frame } from './frame.ts'
+import { cleanPlate, type Plate } from './plate.ts'
 import * as E from './edit.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -50,7 +53,7 @@ export interface Track {
   locked: boolean
 }
 
-export type ItemKind = 'media' | 'subs' | 'freeze'
+export type ItemKind = 'media' | 'subs' | 'freeze' | 'text'
 
 export interface Item {
   id: string
@@ -75,6 +78,8 @@ export interface Item {
   effects: Effect[]
   /** масштаб, положение и кроп картинки в кадре проекта */
   frame: Frame
+  /** для kind 'text': параметры надписи; у остальных null */
+  plate: Plate | null
   /** для kind 'subs': id видеокуска, за которым едут субтитры; null — живут сами */
   link: string | null
 }
@@ -126,7 +131,7 @@ export interface Canvas {
 }
 
 export interface Project {
-  version: 9
+  version: 10
   id: string
   name: string
   createdAt: string
@@ -174,7 +179,7 @@ const newTrack = (kind: TrackKind): Track => ({ id: uid('t'), kind, muted: false
 
 export function newProject(name: string, now = new Date().toISOString()): Project {
   return {
-    version: 9,
+    version: 10,
     id: uid('p'),
     name,
     createdAt: now,
@@ -206,7 +211,7 @@ export const audioTracks = (p: Project): Track[] => p.tracks.filter((t) => t.kin
  * хотя файл видео. Новый (ещё без дорожки) — по файлу.
  */
 export function itemTrackKind(p: Project, it: Item): TrackKind {
-  if (it.kind === 'subs') return 'video'
+  if (it.kind === 'subs' || it.kind === 'text') return 'video'
   const own = p.tracks.find((t) => t.id === it.trackId)
   if (own) return own.kind
   return mediaOf(p, it.mediaId)?.hasVideo ? 'video' : 'audio'
@@ -326,7 +331,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, plate: null, link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -374,6 +379,20 @@ export function trimItem(p: Project, id: string, edge: 'start' | 'end', t: numbe
   const dur = mediaOf(p, it.mediaId)?.duration ?? it.out
   const neighbors = itemsOn(p, it.trackId).filter((x) => x.id !== id)
   let next: Item
+  // надпись не привязана к файлу: края свободны, длина = out
+  if (it.kind === 'text') {
+    if (edge === 'start') {
+      const prev = neighbors.filter((x) => itemEnd(x) <= it.start + 1e-6).pop()
+      const lo = prev ? itemEnd(prev) : 0
+      const nt = Math.min(itemEnd(it) - MIN_ITEM, Math.max(lo, t))
+      next = { ...it, start: r3(nt), out: r3(itemEnd(it) - nt) }
+    } else {
+      const nxt = neighbors.find((x) => x.start >= itemEnd(it) - 1e-6)
+      const nt = Math.min(nxt ? nxt.start : Infinity, 3600 + it.start, Math.max(it.start + MIN_ITEM, t))
+      next = { ...it, out: r3(nt - it.start) }
+    }
+    return finish({ ...p, items: p.items.map((x) => (x.id === id ? next : x)) })
+  }
   if (edge === 'start') {
     let lo = Math.max(0, it.start - it.in / it.speed)
     const prev = neighbors.filter((x) => itemEnd(x) <= it.start + 1e-6).pop()
@@ -397,6 +416,12 @@ export function splitItem(p: Project, id: string, t: number): { p: Project; id: 
   if (!it0 || lockedItem(p, it0) || t <= it0.start + MIN_ITEM || t >= itemEnd(it0) - MIN_ITEM) return { p, id: '' }
   const it = unlinked(it0)
   const cut = r3(tlToSrc(it, t))
+  // надпись делится по длине: параметры те же у обеих половин
+  if (it.kind === 'text') {
+    const l: Item = { ...it, out: r3(t - it.start) }
+    const r: Item = { ...it, id: uid('i'), start: r3(t), out: r3(itemEnd(it) - t) }
+    return { p: finish({ ...p, items: [...p.items.filter((x) => x.id !== id), l, r] }), id: r.id }
+  }
   // стоп-кадр делится по длине: кадр (in) у обеих половин тот же
   if (it.kind === 'freeze') {
     const l: Item = { ...it, out: r3(it.in + (t - it.start)) }
@@ -478,7 +503,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, plate: null, link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -799,7 +824,7 @@ export function sanitizeProject(raw: unknown): Project | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   const ver = typeof r.version === 'number' ? r.version : 0
-  if (ver < 3 || ver > 9) return null
+  if (ver < 3 || ver > 10) return null
   const media: MediaRef[] = Array.isArray(r.media)
     ? (r.media as Array<Record<string, unknown>>)
         .filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string' && num(m.duration, 0) > 0)
@@ -833,24 +858,25 @@ export function sanitizeProject(raw: unknown): Project | null {
   const legacySubs: string[] = []
   const items: Item[] = Array.isArray(r.items)
     ? (r.items as Array<Record<string, unknown>>)
-        .filter((i) => i && typeof i.id === 'string' && mediaIds.has(i.mediaId as string) && trackIds.has(i.trackId as string))
+        .filter((i) => i && typeof i.id === 'string' && (mediaIds.has(i.mediaId as string) || i.kind === 'text') && trackIds.has(i.trackId as string))
         .map((i) => {
-          const kind: ItemKind = i.kind === 'subs' ? 'subs' : i.kind === 'freeze' ? 'freeze' : 'media'
+          const kind: ItemKind = i.kind === 'subs' ? 'subs' : i.kind === 'freeze' ? 'freeze' : i.kind === 'text' ? 'text' : 'media'
           // v3: у куска был флаг «показывать субтитры» — теперь это связанный кусок субтитров
           if (ver === 3 && i.subs === true) legacySubs.push(i.id as string)
           const media = mediaOf1(i.mediaId as string)
           return {
             id: i.id as string,
             kind,
-            mediaId: i.mediaId as string,
+            mediaId: kind === 'text' ? '' : (i.mediaId as string),
             trackId: i.trackId as string,
             start: Math.max(0, num(i.start, 0)),
-            in: Math.max(0, num(i.in, 0)),
-            out: num(i.out, 0),
+            in: kind === 'text' ? 0 : Math.max(0, num(i.in, 0)),
+            out: kind === 'text' ? Math.min(3600, num(i.out, 0)) : num(i.out, 0),
             // до v6 звук всегда играл вместе с видео; у субтитров звука нет
             audio: kind === 'media' && !!media?.hasAudio && i.audio !== false,
-            effects: kind === 'subs' ? [] : cleanEffects(i.effects),
-            frame: kind === 'subs' ? { ...DEFAULT_FRAME } : cleanFrame(i.frame),
+            effects: kind === 'subs' || kind === 'text' ? [] : cleanEffects(i.effects),
+            frame: kind === 'subs' || kind === 'text' ? { ...DEFAULT_FRAME } : cleanFrame(i.frame),
+            plate: kind === 'text' ? cleanPlate(i.plate, FONTS.map((f) => f.id)) : null,
             speed: kind === 'media' ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, num(i.speed, 1))) : 1,
             volume: Math.min(1, Math.max(0, num(i.volume, 1))),
             gain: kind === 'media' ? cleanPoints(i.gain) : [],
@@ -902,7 +928,7 @@ export function sanitizeProject(raw: unknown): Project | null {
       ? { w: even((r.canvas as Canvas).w), h: even((r.canvas as Canvas).h) }
       : null
   let p: Project = {
-    version: 9,
+    version: 10,
     id: str(r.id) || uid('p'),
     name: str(r.name, 'Проект').slice(0, 120) || 'Проект',
     createdAt: str(r.createdAt),

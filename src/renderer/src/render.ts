@@ -6,7 +6,9 @@ import './fonts'
 import { fontFamilyOf } from '../../shared/fonts'
 import { buildPhrases, captionAt, type Phrase, type SubtitleStyle } from '../../shared/timeline'
 import type { Word } from '../../shared/types'
+import type { Plate } from '../../shared/plate'
 import { createCaptionView, setupStage, type CaptionView } from './caption'
+import { fillPlate, loadPlateFont } from './plateDom'
 import { loadCustomFont } from './customFont'
 
 interface InitConfig {
@@ -20,6 +22,8 @@ declare global {
   interface Window {
     __init(cfg: InitConfig): Promise<void>
     __frame(t: number): Promise<void>
+    /** нарисовать одну текстовую плашку на прозрачном фоне кадра W×H */
+    __plate(cfg: { plate: Plate; W: number; H: number }): Promise<void>
   }
 }
 
@@ -58,5 +62,20 @@ window.__init = async (cfg) => {
 window.__frame = (t) => {
   view.render(captionAt(words, phrases, style, t))
   // два rAF: стиль применён и закоммичен в композитор до снимка
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+}
+
+window.__plate = async (cfg) => {
+  document.documentElement.style.background = 'transparent'
+  document.body.style.background = 'transparent'
+  const stage = document.getElementById('stage')!
+  stage.textContent = ''
+  stage.style.position = 'relative'
+  stage.style.overflow = 'hidden'
+  const el = document.createElement('div')
+  stage.appendChild(el)
+  await loadPlateFont(cfg.plate)
+  await document.fonts.ready
+  fillPlate(el, cfg.plate, cfg.W, cfg.H)
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 }

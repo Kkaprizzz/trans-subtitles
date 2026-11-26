@@ -31,6 +31,14 @@ export interface FramingOpt {
   offsetX: number
 }
 
+/** Готовая картинка надписи (PNG на весь кадр) и её время на таймлайне. */
+export interface TextLayerInput {
+  trackId: string
+  path: string
+  start: number
+  end: number
+}
+
 export interface GraphOpts {
   W: number
   H: number
@@ -41,6 +49,8 @@ export interface GraphOpts {
   subLayers: SubLayerInput[]
   /** кадрирование файла рамки (экспорт клипа) */
   framing?: FramingOpt
+  /** картинки надписей; они встают в слои по высоте своих дорожек */
+  textLayers?: TextLayerInput[]
 }
 
 export interface ExportCommand {
@@ -173,6 +183,25 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
         graph.push(
           `[${k}:v]format=gbrap,setpts=PTS-STARTPTS+${s}/TB[s${k}]`,
           `[${last}][s${k}]overlay=x=0:y=0:format=auto:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`
+        )
+        last = `o${k}`
+      }
+    })
+  }
+  // надписи: готовые картинки на всё время куска, слой по высоте дорожки
+  for (const tl of o.textLayers ?? []) {
+    if (hidden.has(tl.trackId)) continue
+    const k = inputCount++
+    inputs.push('-loop', '1', '-framerate', String(o.fps), '-t', f3(tl.end - tl.start), '-i', tl.path)
+    const s = f3(tl.start)
+    const e = f3(tl.end)
+    layers.push({
+      z: trackIdx.get(tl.trackId) ?? 0,
+      sort: tl.start,
+      apply: () => {
+        graph.push(
+          `[${k}:v]format=rgba,setpts=PTS-STARTPTS+${s}/TB[x${k}]`,
+          `[${last}][x${k}]overlay=x=0:y=0:format=auto:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`
         )
         last = `o${k}`
       }
