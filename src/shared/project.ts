@@ -1,5 +1,6 @@
 /**
- * Модель проекта монтажки (формат v8).
+ * Модель проекта монтажки (формат v9).
+ * Кадр куска (frame): масштаб, положение и кроп картинки; эффекты (effects) — список с параметрами.
  * Стоп-кадр — кусок вида 'freeze': in — секунда файла, кадр которой показывается, out = in + длина; звука у него нет.
  * Скорость куска (speed, 0.25–4): на таймлайне он занимает (out − in) ÷ speed секунд; in/out — всегда секунды файла. Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
  *
@@ -14,6 +15,7 @@
  */
 import { cleanPoints, splitGain, type GainPoint } from './audio.ts'
 import { cleanEffects, type Effect } from './effects.ts'
+import { cleanFrame, DEFAULT_FRAME, type Frame } from './frame.ts'
 import * as E from './edit.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -71,6 +73,8 @@ export interface Item {
   gain: GainPoint[]
   /** эффекты картинки (блюр…), действуют на весь кусок */
   effects: Effect[]
+  /** масштаб, положение и кроп картинки в кадре проекта */
+  frame: Frame
   /** для kind 'subs': id видеокуска, за которым едут субтитры; null — живут сами */
   link: string | null
 }
@@ -122,7 +126,7 @@ export interface Canvas {
 }
 
 export interface Project {
-  version: 8
+  version: 9
   id: string
   name: string
   createdAt: string
@@ -170,7 +174,7 @@ const newTrack = (kind: TrackKind): Track => ({ id: uid('t'), kind, muted: false
 
 export function newProject(name: string, now = new Date().toISOString()): Project {
   return {
-    version: 8,
+    version: 9,
     id: uid('p'),
     name,
     createdAt: now,
@@ -322,7 +326,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -474,7 +478,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -795,7 +799,7 @@ export function sanitizeProject(raw: unknown): Project | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   const ver = typeof r.version === 'number' ? r.version : 0
-  if (ver < 3 || ver > 8) return null
+  if (ver < 3 || ver > 9) return null
   const media: MediaRef[] = Array.isArray(r.media)
     ? (r.media as Array<Record<string, unknown>>)
         .filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string' && num(m.duration, 0) > 0)
@@ -846,6 +850,7 @@ export function sanitizeProject(raw: unknown): Project | null {
             // до v6 звук всегда играл вместе с видео; у субтитров звука нет
             audio: kind === 'media' && !!media?.hasAudio && i.audio !== false,
             effects: kind === 'subs' ? [] : cleanEffects(i.effects),
+            frame: kind === 'subs' ? { ...DEFAULT_FRAME } : cleanFrame(i.frame),
             speed: kind === 'media' ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, num(i.speed, 1))) : 1,
             volume: Math.min(1, Math.max(0, num(i.volume, 1))),
             gain: kind === 'media' ? cleanPoints(i.gain) : [],
@@ -897,7 +902,7 @@ export function sanitizeProject(raw: unknown): Project | null {
       ? { w: even((r.canvas as Canvas).w), h: even((r.canvas as Canvas).h) }
       : null
   let p: Project = {
-    version: 8,
+    version: 9,
     id: str(r.id) || uid('p'),
     name: str(r.name, 'Проект').slice(0, 120) || 'Проект',
     createdAt: str(r.createdAt),

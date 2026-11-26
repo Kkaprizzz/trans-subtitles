@@ -8,7 +8,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { fontFamilyOf } from '../../../shared/fonts'
 import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
 import { gainAt } from '../../../shared/audio'
-import { blurSigma } from '../../../shared/effects'
+import { cssFilter } from '../../../shared/effects'
+import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
 import { activeAt, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
 import { buildPhrases, captionAt, DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import { createCaptionView, setupStage, type CaptionView } from '../caption'
@@ -34,6 +35,9 @@ interface Props {
   clipView?: { mediaId: string; mode: Framing; offsetX: number } | null
   /** сдвиг кропа, потянутый мышью в кадре */
   onOffset?(v: number): void
+  /** выделенный кусок, у которого можно двигать и масштабировать кадр мышью в превью (null — нет) */
+  frameItemId?: string | null
+  onFrameDrag?(id: string, patch: Partial<Frame>): void
 }
 
 /** z-index слоя по положению дорожки: выше дорожка — выше слой. */
@@ -192,9 +196,22 @@ export default function Player(p: Props): React.JSX.Element {
         const framed = !!cv && it.mediaId === cv.mediaId
         el.style.objectFit = framed && cv.mode === 'crop' ? 'cover' : 'contain'
         el.style.objectPosition = framed && cv.mode === 'crop' ? `${cv.offsetX * 100}% 50%` : '50% 50%'
-        // эффекты куска: блюр в долях высоты кадра — как в экспорте
-        const px = it.effects.reduce((n, e) => (e.on && e.type === 'blur' ? n + blurSigma(e.strength, frameH) : n), 0)
-        el.style.filter = px >= 0.3 ? `blur(${px.toFixed(1)}px)` : ''
+        // эффекты куска (блюр — в долях высоты кадра, как в экспорте)
+        el.style.filter = cssFilter(it.effects, frameH)
+        // кадр куска: кроп режет края вписанной картинки (clip-path в px элемента), масштаб и положение — от центра кадра
+        const fr = it.frame
+        if (isDefaultFrame(fr)) {
+          el.style.transform = ''
+          el.style.clipPath = ''
+        } else {
+          const fit = framed ? { w: frameW, h: frameH } : fitSize(m.width ?? 0, m.height ?? 0, frameW, frameH)
+          const l = (frameW - fit.w) / 2 + (fit.w * fr.cl) / 100
+          const r = (frameW - fit.w) / 2 + (fit.w * fr.cr) / 100
+          const t = (frameH - fit.h) / 2 + (fit.h * fr.ct) / 100
+          const b = (frameH - fit.h) / 2 + (fit.h * fr.cb) / 100
+          el.style.clipPath = fr.cl || fr.cr || fr.ct || fr.cb ? `inset(${t.toFixed(1)}px ${r.toFixed(1)}px ${b.toFixed(1)}px ${l.toFixed(1)}px)` : ''
+          el.style.transform = `translate(${fr.x}%, ${fr.y}%) scale(${fr.scale / 100})`
+        }
       }
       // скорость куска; тон сохраняется (preservesPitch по умолчанию включён)
       if (el.playbackRate !== it.speed) el.playbackRate = it.speed
@@ -275,6 +292,34 @@ export default function Player(p: Props): React.JSX.Element {
   const cropExcess = frameH * srcAspect - frameW
   const canOffset = !!cv && cv.mode === 'crop' && !!p.onOffset && cropExcess > 1
 
+  // рамка выделенного куска в предпросмотре: тянуть внутри — положение, за угол — масштаб (пропорционально)
+  const selItem = !cv && p.frameItemId ? p.project.items.find((i) => i.id === p.frameItemId && p.time >= i.start && p.time < itemEnd(i)) : undefined
+  const selMedia = selItem ? mediaOf(p.project, selItem.mediaId) : undefined
+  const selBox = (() => {
+    if (!selItem || !selMedia || frameW <= 0) return null
+    const r = frameRect(selItem.frame, selMedia.width ?? 0, selMedia.height ?? 0, frameW, frameH)
+    const fr = selItem.frame
+    return { x: r.x + (r.w * fr.cl) / 100, y: r.y + (r.h * fr.ct) / 100, w: r.w * (1 - (fr.cl + fr.cr) / 100), h: r.h * (1 - (fr.ct + fr.cb) / 100) }
+  })()
+  const dragRef = useRef<{ mode: string; x: number; y: number; frame: Frame; cx: number; cy: number; r0: number } | null>(null)
+  const startFrameDrag = (e: React.PointerEvent, mode: string): void => {
+    if (!selItem || e.button !== 0 || !stageRef.current) return
+    e.stopPropagation()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+    const fr0 = frameRef.current?.getBoundingClientRect()
+    if (!fr0) return
+    const rect = frameRect(selItem.frame, selMedia?.width ?? 0, selMedia?.height ?? 0, frameW, frameH)
+    const cx = fr0.left + rect.x + rect.w / 2
+    const cy = fr0.top + rect.y + rect.h / 2
+    dragRef.current = { mode, x: e.clientX, y: e.clientY, frame: selItem.frame, cx, cy, r0: Math.max(8, Math.hypot(e.clientX - cx, e.clientY - cy)) }
+  }
+  const onFramePointerMove = (e: React.PointerEvent): void => {
+    const d = dragRef.current
+    if (!d || !p.frameItemId || !p.onFrameDrag) return
+    if (d.mode === 'move') p.onFrameDrag(p.frameItemId, { x: d.frame.x + ((e.clientX - d.x) / frameW) * 100, y: d.frame.y + ((e.clientY - d.y) / frameH) * 100 })
+    else p.onFrameDrag(p.frameItemId, { scale: d.frame.scale * (Math.hypot(e.clientX - d.cx, e.clientY - d.cy) / d.r0) })
+  }
+
   const empty = p.project.items.length === 0
   const nothingNow = !empty && !p.project.items.some((i) => p.time >= i.start && p.time < itemEnd(i))
 
@@ -290,14 +335,32 @@ export default function Player(p: Props): React.JSX.Element {
           offDrag.current = { x: e.clientX, start: cv.offsetX, excess: cropExcess }
         }}
         onPointerMove={(e) => {
+          onFramePointerMove(e)
           const d = offDrag.current
           if (!d || !p.onOffset) return
           p.onOffset(Math.min(1, Math.max(0, d.start - (e.clientX - d.x) / d.excess)))
         }}
-        onPointerUp={() => (offDrag.current = null)}
-        onPointerCancel={() => (offDrag.current = null)}
+        onPointerUp={() => {
+          offDrag.current = null
+          dragRef.current = null
+        }}
+        onPointerCancel={() => {
+          offDrag.current = null
+          dragRef.current = null
+        }}
       >
         {cv?.mode === 'fit-blur' && <canvas ref={bgRef} className="pl-bg" width={54} height={96} />}
+        {selBox && p.onFrameDrag && (
+          <div
+            className="pl-sel"
+            style={{ left: selBox.x, top: selBox.y, width: selBox.w, height: selBox.h }}
+            onPointerDown={(e) => startFrameDrag(e, 'move')}
+          >
+            {(['nw', 'ne', 'sw', 'se'] as const).map((c) => (
+              <span key={c} className={`pl-handle ${c}`} onPointerDown={(e) => startFrameDrag(e, c)} />
+            ))}
+          </div>
+        )}
         {p.layers.map((l) => (
           <CaptionLayer
             key={l.trackId}

@@ -2,7 +2,8 @@
 import { memo, useState } from 'react'
 import { deleteClip, patchClip, placement } from '../../../shared/cut'
 import { EFFECTS } from '../../../shared/effects'
-import { canHaveEffects, clampSpeed, patchEffect, removeEffect, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
+import { FRAME_LIMITS, isDefaultFrame, type Frame, type FrameKey } from '../../../shared/frame'
+import { canHaveEffects, clampSpeed, patchEffect, patchFrame, removeEffect, resetFrame, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
 import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
@@ -235,25 +236,111 @@ function FreezeRow(p: { project: Project; item: Item; onCommit(next: Project, ke
   )
 }
 
-/** Эффекты куска: сила ползунком, глаз «вкл/выкл», удалить. */
+/** Эффекты куска: у каждого заголовок (глаз «вкл/выкл», удалить) и ползунки его параметров. */
 function EffectsBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
   return (
     <div className="insp-col">
       <span>Эффекты</span>
       {p.item.effects.length === 0 && <span className="dim fx-none">Пока нет: вкладка «Эффекты» слева в панели медиа</span>}
       {p.item.effects.map((e) => (
-        <div key={e.id} className={`fx-row${e.on ? '' : ' off'}`}>
-          <button className="fx-eye" aria-pressed={!e.on} title={e.on ? 'Выключить эффект' : 'Включить эффект'} onClick={() => p.onCommit(patchEffect(p.project, p.item.id, e.id, { on: !e.on }))}>
-            {e.on ? '●' : '○'}
-          </button>
-          <span className="fx-title">{EFFECTS[e.type].title}</span>
-          <input type="range" min={0} max={100} step={1} value={e.strength} onChange={(ev) => p.onCommit(patchEffect(p.project, p.item.id, e.id, { strength: Number(ev.target.value) }), `fx-${e.id}`)} aria-label={`${EFFECTS[e.type].title}: сила`} />
-          <span className="mono fx-val">{e.strength}</span>
-          <button className="fx-del" title="Убрать эффект" aria-label="Убрать эффект" onClick={() => p.onCommit(removeEffect(p.project, p.item.id, e.id))}>
-            ×
-          </button>
+        <div key={e.id} className={`fx-box${e.on ? '' : ' off'}`}>
+          <div className="fx-head">
+            <button className="fx-eye" aria-pressed={!e.on} title={e.on ? 'Выключить эффект' : 'Включить эффект'} onClick={() => p.onCommit(patchEffect(p.project, p.item.id, e.id, { on: !e.on }))}>
+              {e.on ? '●' : '○'}
+            </button>
+            <span className="fx-title">{EFFECTS[e.type].title}</span>
+            <button className="fx-del" title="Убрать эффект" aria-label="Убрать эффект" onClick={() => p.onCommit(removeEffect(p.project, p.item.id, e.id))}>
+              ×
+            </button>
+          </div>
+          {EFFECTS[e.type].params.map((pr) => (
+            <label key={pr.key} className="fx-param">
+              <span>{pr.title}</span>
+              <input
+                type="range"
+                min={pr.min}
+                max={pr.max}
+                step={1}
+                value={e.values[pr.key] ?? pr.default}
+                onChange={(ev) => p.onCommit(patchEffect(p.project, p.item.id, e.id, { key: pr.key, value: Number(ev.target.value) }), `fx-${e.id}-${pr.key}`)}
+                aria-label={`${EFFECTS[e.type].title}: ${pr.title}`}
+              />
+              <span className="mono fx-val">{e.values[pr.key] ?? pr.default}</span>
+            </label>
+          ))}
         </div>
       ))}
+    </div>
+  )
+}
+
+const FRAME_ROWS: Array<{ key: FrameKey; title: string }> = [
+  { key: 'scale', title: 'Масштаб, %' },
+  { key: 'x', title: 'Положение X, %' },
+  { key: 'y', title: 'Положение Y, %' },
+  { key: 'cl', title: 'Кроп слева, %' },
+  { key: 'cr', title: 'Кроп справа, %' },
+  { key: 'ct', title: 'Кроп сверху, %' },
+  { key: 'cb', title: 'Кроп снизу, %' }
+]
+
+/** Один числовой ввод кадра: правка применяется по Enter/уходу из поля, ползунок — сразу. */
+function FrameField(p: { frame: Frame; k: FrameKey; title: string; onChange(k: FrameKey, v: number, live: boolean): void }): React.JSX.Element {
+  const val = p.frame[p.k]
+  const [text, setText] = useState(String(val))
+  const [seen, setSeen] = useState(val)
+  if (seen !== val) {
+    setSeen(val)
+    setText(String(val))
+  }
+  const [lo, hi] = FRAME_LIMITS[p.k]
+  return (
+    <label className="frame-field">
+      <span>{p.title}</span>
+      <input type="range" min={lo} max={hi} step={p.k === 'scale' || p.k === 'x' || p.k === 'y' ? 1 : 1} value={val} onChange={(e) => p.onChange(p.k, Number(e.target.value), true)} aria-label={p.title} />
+      <input
+        type="text"
+        inputMode="decimal"
+        className="mono"
+        value={text}
+        aria-label={`${p.title}, число`}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={() => {
+          const v = Number(text.replace(',', '.'))
+          if (!Number.isFinite(v)) setText(String(val))
+          else if (v !== val) p.onChange(p.k, v, false)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          e.stopPropagation()
+        }}
+      />
+    </label>
+  )
+}
+
+/** Кадр куска: масштаб, положение, кроп; «Сбросить». Мышью — рамка в предпросмотре. */
+function FrameBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+  const f = p.item.frame
+  return (
+    <div className="insp-col">
+      <span>Кадр</span>
+      <div className="frame-grid">
+        {FRAME_ROWS.map((r) => (
+          <FrameField
+            key={r.key}
+            frame={f}
+            k={r.key}
+            title={r.title}
+            onChange={(k, v, live) => p.onCommit(patchFrame(p.project, p.item.id, { [k]: v }, k), live ? `fr-${p.item.id}-${k}` : undefined)}
+          />
+        ))}
+      </div>
+      <div className="insp-link">
+        <button className="btn small" disabled={isDefaultFrame(f)} onClick={() => p.onCommit(resetFrame(p.project, p.item.id))}>
+          Сбросить
+        </button>
+      </div>
     </div>
   )
 }
@@ -289,6 +376,7 @@ function Inspector(p: Props): React.JSX.Element {
           </dl>
           <SpeedRow project={pr} ids={[one.id]} onCommit={p.onCommit} onMessage={p.onMessage} />
           {one.kind === 'freeze' && <FreezeRow key={one.id} project={pr} item={one} onCommit={p.onCommit} onMessage={p.onMessage} />}
+          {canHaveEffects(pr, one) && <FrameBlock project={pr} item={one} onCommit={p.onCommit} />}
           {canHaveEffects(pr, one) && <EffectsBlock project={pr} item={one} onCommit={p.onCommit} />}
           {subsOf(pr, one.id).length > 0 && (
             <div className="insp-link">

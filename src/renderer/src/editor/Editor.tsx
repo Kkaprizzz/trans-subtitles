@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, insertFreeze, joinSelected } from '../../../shared/mix'
+import { addEffect, canHaveEffects, insertFreeze, joinSelected, patchFrame } from '../../../shared/mix'
 import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
 import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
@@ -288,6 +288,11 @@ export default function Editor(p: Props): React.JSX.Element {
   const focusRef = useRef(focusRange)
   focusRef.current = focusRange
   const clipView = useMemo(() => (focusClip && focusAt ? { mediaId: focusClip.mediaId, mode: focusClip.framing, offsetX: focusClip.offsetX } : null), [focusClip?.mediaId, focusClip?.framing, focusClip?.offsetX, !!focusAt]) // eslint-disable-line react-hooks/exhaustive-deps
+  // у выделенного одного куска картинки (видео, оверлей, стоп-кадр) в превью рамка: тянуть — положение, угол — масштаб
+  const frameItemId = useMemo(() => {
+    const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
+    return it && canHaveEffects(project, it) ? it.id : null
+  }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
   const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
   // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
@@ -1063,6 +1068,8 @@ export default function Editor(p: Props): React.JSX.Element {
           onEditCommit={commitEdit}
           onEditCancel={() => setEditWord(null)}
           clipView={clipView}
+          frameItemId={frameItemId}
+          onFrameDrag={(id, patch) => commit(patchFrame(projectRef.current, id, patch), `frd-${id}`)}
           onOffset={focusClip ? (v) => commit(patchClip(projectRef.current, focusClip.id, { offsetX: v }), `co-${focusClip.id}`) : undefined}
         />
         <Transport

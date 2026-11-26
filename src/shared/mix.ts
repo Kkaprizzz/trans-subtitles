@@ -3,7 +3,8 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
+import { clampParam, EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
+import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
 import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project } from './project.ts'
 
 const EPS = 0.02
@@ -71,6 +72,7 @@ export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (a.audio !== b.audio) return 'У одного звук отделён, у другого прикреплён'
   if (Math.abs(a.speed - b.speed) > 1e-6) return 'У кусков разная скорость'
   if (!sameEffects(a.effects, b.effects)) return 'У кусков разные эффекты'
+  if (!sameFrame(a.frame, b.frame)) return 'У кусков разный кадр (масштаб, положение или кроп)'
   return null
 }
 
@@ -295,6 +297,7 @@ export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FR
     volume: 1,
     gain: [],
     effects: [],
+    frame: { ...DEFAULT_FRAME },
     link: null
   }
   return { p: finish({ ...cur, items: [...cur.items, fz] }), id: fz.id }
@@ -332,22 +335,39 @@ export function addEffect(p: Project, ids: string[], type: EffectType): { p: Pro
   return { p: added ? { ...p, items } : p, added }
 }
 
-export function patchEffect(p: Project, itemId: string, effectId: string, patch: { on?: boolean; strength?: number }): Project {
+export function patchEffect(p: Project, itemId: string, effectId: string, patch: { on?: boolean; key?: string; value?: number }): Project {
   return {
     ...p,
-    items: p.items.map((i) =>
-      i.id !== itemId
-        ? i
-        : {
-            ...i,
-            effects: i.effects.map((e) =>
-              e.id !== effectId ? e : { ...e, ...(patch.on === undefined ? {} : { on: patch.on }), ...(patch.strength === undefined ? {} : { strength: Math.round(Math.min(100, Math.max(0, patch.strength))) }) }
-            )
+    items: p.items.map((i) => {
+      if (i.id !== itemId) return i
+      return {
+        ...i,
+        effects: i.effects.map((e) => {
+          if (e.id !== effectId) return e
+          const next = { ...e }
+          if (patch.on !== undefined) next.on = patch.on
+          if (patch.key !== undefined && patch.value !== undefined) {
+            const v = clampParam(e.type, patch.key, patch.value)
+            if (v !== null) next.values = { ...e.values, [patch.key]: v }
           }
-    )
+          return next
+        })
+      }
+    })
   }
 }
 
 export function removeEffect(p: Project, itemId: string, effectId: string): Project {
   return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, effects: i.effects.filter((e) => e.id !== effectId) } : i)) }
+}
+
+// --- кадр: масштаб, положение, кроп ---
+
+/** Меняет поля «Кадра» куска (значения зажимаются в пределы; кроп не съедает картинку целиком). prefer — какую сторону кропа двигают. */
+export function patchFrame(p: Project, itemId: string, patch: Partial<Frame>, prefer?: FrameKey): Project {
+  return { ...p, items: p.items.map((i) => (i.id === itemId && canHaveEffects(p, i) ? { ...i, frame: patchFrameValues(i.frame, patch, prefer) } : i)) }
+}
+
+export function resetFrame(p: Project, itemId: string): Project {
+  return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, frame: { ...DEFAULT_FRAME } } : i)) }
 }

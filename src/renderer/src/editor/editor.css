@@ -1724,3 +1724,100 @@ textarea {
 .fx-none {
   font-size: 12px;
 }
+
+/* рамка выделенного куска в предпросмотре: положение и масштаб мышью */
+.pl-sel {
+  position: absolute;
+  z-index: 2000;
+  border: 1.5px solid var(--accent);
+  cursor: move;
+  touch-action: none;
+}
+.pl-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  background: var(--ink);
+  border: 2px solid var(--accent);
+  border-radius: 2px;
+}
+.pl-handle.nw {
+  left: -6px;
+  top: -6px;
+  cursor: nwse-resize;
+}
+.pl-handle.se {
+  right: -6px;
+  bottom: -6px;
+  cursor: nwse-resize;
+}
+.pl-handle.ne {
+  right: -6px;
+  top: -6px;
+  cursor: nesw-resize;
+}
+.pl-handle.sw {
+  left: -6px;
+  bottom: -6px;
+  cursor: nesw-resize;
+}
+
+.fx-box {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: var(--panel-sunk);
+  border-radius: var(--radius);
+}
+.fx-box.off {
+  opacity: 0.55;
+}
+.fx-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fx-head .fx-title {
+  flex: 1;
+  font-weight: 600;
+}
+.fx-param {
+  display: grid;
+  grid-template-columns: 92px 1fr 30px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.fx-param input[type='range'] {
+  min-width: 0;
+}
+.frame-grid {
+  display: grid;
+  gap: 4px;
+}
+.frame-field {
+  display: grid;
+  grid-template-columns: 96px 1fr 52px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.frame-field input[type='range'] {
+  min-width: 0;
+}
+.frame-field input[type='text'] {
+  width: 100%;
+  padding: 4px 6px;
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font-size: 12px;
+  text-align: right;
+}
+.frame-field input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+}

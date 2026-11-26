@@ -9,6 +9,7 @@
  */
 import { gainExpr, gainPeak } from './audio.ts'
 import { effectFilters } from './effects.ts'
+import { fitSize, frameFilters } from './frame.ts'
 import { framingChain } from './cut.ts'
 import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
@@ -133,14 +134,20 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const timing = it.kind === 'freeze' ? freezeTiming(itemDur(it), s, o.fps) : retime(it.speed, s, o.fps)
           // эффекты кладутся на готовый кадр куска (после вписывания/кадрирования): сила блюра считается от высоты кадра
           const fx = effectFilters(it.effects, H)
-          const vOut = fx.length ? `f${k}` : `v${k}`
+          // размер вписанной картинки в кадре (для кропа и положения); у кадрированного клипа картинка занимает весь кадр
+          const fit = framed ? { w: W, h: H } : fitSize(m.width ?? 0, m.height ?? 0, W, H)
+          const ff = frameFilters(it.frame, fit.w, fit.h)
+          // цепочка: вписывание/кадрирование → эффекты → кроп и масштаб → наложение (положение от центра кадра)
+          const post = [...fx, ...(ff ? ff.chain : [])]
+          const vOut = post.length ? `f${k}` : `v${k}`
           if (framed && o.framing) {
             graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k)))
           } else {
             graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${timing}[${vOut}]`)
           }
-          if (fx.length) graph.push(`[${vOut}]${fx.join(',')}[v${k}]`)
-          graph.push(`[${last}][v${k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
+          if (post.length) graph.push(`[${vOut}]${post.join(',')}[v${k}]`)
+          const pos = ff ? `x='${ff.x}':y='${ff.y}'` : 'x=(W-w)/2:y=(H-h)/2'
+          graph.push(`[${last}][v${k}]overlay=${pos}:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
           last = `o${k}`
         }
       })
