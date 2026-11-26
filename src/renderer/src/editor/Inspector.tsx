@@ -6,7 +6,8 @@ import { EFFECTS } from '../../../shared/effects'
 import { FONTS, fontById } from '../../../shared/fonts'
 import { FRAME_LIMITS, isDefaultFrame, type FrameKey } from '../../../shared/frame'
 import { MAX_PLATE_TEXT, PLATE_LIMITS, type Plate } from '../../../shared/plate'
-import { canHaveEffects, clampSpeed, disableKeys, enableKeys, frameValueAt, hasFrameCrop, patchEffect, patchFrame, patchPlate, removeEffect, resetFrame, setFreezeLength, setPropAt, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
+import { SHAPE_LIMITS, shapeLabel } from '../../../shared/shape'
+import { canHaveEffects, clampSpeed, disableKeys, enableKeys, frameValueAt, hasFrameCrop, patchEffect, patchFrame, patchPlate, patchShape, removeEffect, resetFrame, setFreezeLength, setPropAt, setSpeed, SPEED_PRESETS, toggleFlip } from '../../../shared/mix'
 import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, trimItem, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
@@ -245,7 +246,7 @@ function FreezeRow(p: { project: Project; item: Item; onCommit(next: Project, ke
 
 /** Эффекты куска: у каждого заголовок (глаз «вкл/выкл», удалить) и параметры — ползунки или выбор из вариантов. */
 function EffectsBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
-  const text = p.item.kind === 'text'
+  const text = p.item.kind === 'text' || p.item.kind === 'shape'
   return (
     <div className="insp-col">
       <span>{text ? 'Анимации' : 'Эффекты'}</span>
@@ -370,6 +371,7 @@ const isKeyProp = (k: FrameKey): k is KeyProp => (KEY_PROPS as string[]).include
 function FrameBlock(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void }): React.JSX.Element {
   const f = p.item.frame
   const text = p.item.kind === 'text'
+  const layer = text || p.item.kind === 'shape'
   const id = p.item.id
   const toggle = (k: KeyProp): void => {
     const n = p.item.keys[k].length
@@ -380,11 +382,11 @@ function FrameBlock(p: { project: Project; item: Item; time: number; getTime(): 
     <div className="insp-col">
       <span>Кадр</span>
       <div className="frame-grid">
-        {FRAME_ROWS.filter((r) => !(text && CROP_KEYS.includes(r.key))).map((r) => {
+        {FRAME_ROWS.filter((r) => !(layer && CROP_KEYS.includes(r.key))).map((r) => {
           const k = r.key
           const keyed = isKeyProp(k) && p.item.keys[k].length > 0
           const value = isKeyProp(k) && keyed ? frameValueAt(p.item, k, p.time) : f[k]
-          const title = text && r.textTitle ? r.textTitle : r.title
+          const title = layer && r.textTitle ? r.textTitle : r.title
           return (
             <FrameField
               key={k}
@@ -398,6 +400,14 @@ function FrameBlock(p: { project: Project; item: Item; time: number; getTime(): 
             />
           )
         })}
+      </div>
+      <div className="seg flip-seg" role="group" aria-label="Зеркало">
+        <button className={f.flipH ? 'on' : ''} aria-pressed={f.flipH === 1} onClick={() => p.onCommit(toggleFlip(p.project, [id], 'h').p)} title="Отзеркалить по горизонтали">
+          ⇄ Горизонтально
+        </button>
+        <button className={f.flipV ? 'on' : ''} aria-pressed={f.flipV === 1} onClick={() => p.onCommit(toggleFlip(p.project, [id], 'v').p)} title="Отзеркалить по вертикали">
+          ⇅ Вертикально
+        </button>
       </div>
       <div className="insp-link">
         <button className="btn small" disabled={isDefaultFrame(f) && !hasKeys(p.item.keys)} onClick={() => p.onCommit(resetFrame(p.project, id))}>
@@ -560,11 +570,98 @@ function TextPanel(p: { project: Project; item: Item; time: number; getTime(): n
   )
 }
 
+/** Длительность слоя (надпись, фигура), секунды: правка двигает правый край. */
+function LenRow(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+  const len = Math.round(itemDur(p.item) * 100) / 100
+  const [text, setText] = useState(String(len))
+  const [seen, setSeen] = useState(len)
+  if (seen !== len) {
+    setSeen(len)
+    setText(String(len))
+  }
+  return (
+    <div className="insp-col">
+      <span>Длительность, с</span>
+      <div className="speed-row">
+        <input
+          type="text"
+          inputMode="decimal"
+          className="mono"
+          value={text}
+          aria-label="Длительность, секунды"
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => {
+            const v = Number(text.replace(',', '.'))
+            if (!Number.isFinite(v) || v <= 0) setText(String(len))
+            else p.onCommit(trimItem(p.project, p.item.id, 'end', p.item.start + v))
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            e.stopPropagation()
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Панель фигуры: цвет, обводка, скругление или толщина, положение, размер, поворот; «Кадр» и анимации как у надписи. */
+function ShapePanel(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void }): React.JSX.Element | null {
+  const sh = p.item.shape
+  if (!sh) return null
+  const id = p.item.id
+  const patch = (x: Partial<typeof sh>, key?: string): void => p.onCommit(patchShape(p.project, id, x), key)
+  const closed = sh.kind === 'rect' || sh.kind === 'round' || sh.kind === 'circle'
+  const L = SHAPE_LIMITS
+  return (
+    <aside className="inspector">
+      <div className="pane-head">
+        <span>Фигура · {shapeLabel(sh).toLowerCase()}</span>
+      </div>
+      <div className="insp-body">
+        <LenRow project={p.project} item={p.item} onCommit={p.onCommit} />
+        <label className="insp-row">
+          <span>Цвет</span>
+          <input type="color" value={sh.fill} onChange={(e) => patch({ fill: e.target.value }, `sf-${id}`)} />
+        </label>
+        {closed && (
+          <>
+            <label className="check">
+              <input type="checkbox" checked={sh.strokeOn} onChange={(e) => patch({ strokeOn: e.target.checked })} />
+              <span>Обводка</span>
+            </label>
+            {sh.strokeOn && (
+              <>
+                <label className="insp-row">
+                  <span>Цвет обводки</span>
+                  <input type="color" value={sh.strokeColor} onChange={(e) => patch({ strokeColor: e.target.value }, `ssc-${id}`)} />
+                </label>
+                <NumField title="Толщина, %" value={sh.stroke} lo={L.stroke[0]} hi={L.stroke[1]} step={0.1} onChange={(v, live) => patch({ stroke: v }, live ? `sst-${id}` : undefined)} />
+              </>
+            )}
+          </>
+        )}
+        {sh.kind === 'round' && <NumField title="Скругление, %" value={sh.radius} lo={L.radius[0]} hi={L.radius[1]} onChange={(v, live) => patch({ radius: v }, live ? `sr-${id}` : undefined)} />}
+        {(sh.kind === 'line' || sh.kind === 'arrow') && <NumField title="Толщина, %" value={sh.thick} lo={L.thick[0]} hi={L.thick[1]} step={0.1} onChange={(v, live) => patch({ thick: v }, live ? `sth-${id}` : undefined)} />}
+        {sh.kind === 'frame' && <NumField title="Толщина, %" value={sh.stroke} lo={0.1} hi={L.stroke[1]} step={0.1} onChange={(v, live) => patch({ stroke: v }, live ? `sst-${id}` : undefined)} />}
+        <NumField title="Положение X, %" value={sh.x} lo={0} hi={100} step={0.5} onChange={(v, live) => patch({ x: v }, live ? `sx-${id}` : undefined)} />
+        <NumField title="Положение Y, %" value={sh.y} lo={0} hi={100} step={0.5} onChange={(v, live) => patch({ y: v }, live ? `sy-${id}` : undefined)} />
+        <NumField title="Ширина, %" value={sh.w} lo={L.w[0]} hi={100} step={0.5} onChange={(v, live) => patch({ w: v }, live ? `sw-${id}` : undefined)} />
+        <NumField title="Высота, %" value={sh.h} lo={L.h[0]} hi={100} step={0.5} onChange={(v, live) => patch({ h: v }, live ? `sh-${id}` : undefined)} />
+        <NumField title="Поворот, °" value={sh.rot} lo={L.rot[0]} hi={L.rot[1]} onChange={(v, live) => patch({ rot: v }, live ? `srot-${id}` : undefined)} />
+        <FrameBlock project={p.project} item={p.item} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />
+        <EffectsBlock project={p.project} item={p.item} onCommit={p.onCommit} />
+      </div>
+    </aside>
+  )
+}
+
 function Inspector(p: Props): React.JSX.Element {
   const pr = p.project
   if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
   const one = p.selected.length === 1 ? pr.items.find((i) => i.id === p.selected[0]) : undefined
   const m = one ? mediaOf(pr, one.mediaId) : undefined
+  if (one && one.kind === 'shape') return <ShapePanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />
   if (one && one.kind === 'text') return <TextPanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} onMessage={p.onMessage} />
 
   if (one && m) {

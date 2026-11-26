@@ -235,7 +235,7 @@ for (const it of v5.items) {
   it.volume = 0.5
 }
 const mig = sanitizeProject(v5)
-assert.equal(mig.version, 11)
+assert.equal(mig.version, 12)
 const mv = mig.items.find((i) => i.mediaId === ma)
 assert.deepEqual([mv.audio, mv.volume, mv.gain], [true, 0.5, []], 'звук прикреплён, уровень сохранён')
 assert.equal(mig.items.find((i) => i.mediaId === mus).audio, true)
@@ -367,7 +367,7 @@ void subsOf
   // сохранение и миграция
   const saved = sanitizeProject(JSON.parse(JSON.stringify(at2.p)))
   assert.equal(saved.items.find((i) => i.id === a1.id).speed, 2)
-  assert.equal(saved.version, 11)
+  assert.equal(saved.version, 12)
   const v6 = JSON.parse(JSON.stringify(q))
   v6.version = 6
   for (const it of v6.items) delete it.speed
@@ -507,9 +507,9 @@ void subsOf
 
   // сохранение и миграция
   const saved = sanitizeProject(JSON.parse(JSON.stringify(e1.p)))
-  assert.equal(saved.version, 11)
+  assert.equal(saved.version, 12)
   assert.equal(saved.items.find((i) => i.kind === 'freeze').effects[0].type, 'blur')
-  assert.equal(saved.version, 11)
+  assert.equal(saved.version, 12)
   const v7 = JSON.parse(JSON.stringify(q))
   v7.version = 7
   for (const it of v7.items) delete it.effects
@@ -543,7 +543,7 @@ void subsOf
   // кадр
   assert.ok(isDefaultFrame(DEFAULT_FRAME))
   assert.equal(frameFilters(DEFAULT_FRAME, 1280, 720), null, 'по умолчанию граф не меняется')
-  assert.deepEqual(cleanFrame({ scale: 9999, x: -500, cl: 99, cr: 99, ct: 'x' }), { scale: 400, x: -100, y: 0, cl: 90, cr: 5, ct: 0, cb: 0, opacity: 100 }, 'зажато, кроп не съедает картинку')
+  assert.deepEqual(cleanFrame({ scale: 9999, x: -500, cl: 99, cr: 99, ct: 'x' }), { scale: 400, x: -100, y: 0, cl: 90, cr: 5, ct: 0, cb: 0, opacity: 100, flipH: 0, flipV: 0 }, 'зажато, кроп не съедает картинку')
   assert.deepEqual(cleanFrame(null), DEFAULT_FRAME)
   assert.equal(patchFrameValues(DEFAULT_FRAME, { cl: 80 }).cl, 80)
   const both = patchFrameValues({ ...DEFAULT_FRAME, cr: 60 }, { cl: 80 }, 'cl')
@@ -589,7 +589,7 @@ void subsOf
   const fzF = insertFreeze(q1, a1.id, 5)
   assert.ok(sameFrame(fzF.p.items.find((i) => i.id === fzF.id).frame, DEFAULT_FRAME), 'стоп-кадр с кадром по умолчанию')
   const rt = sanitizeProject(JSON.parse(JSON.stringify(q1)))
-  assert.equal(rt.version, 11)
+  assert.equal(rt.version, 12)
   assert.equal(rt.items[0].frame.scale, 50)
   const v8 = JSON.parse(JSON.stringify(q1))
   v8.version = 8
@@ -666,7 +666,7 @@ void subsOf
   assert.ok(!hidden.args.includes('/tmp/p0.png'), 'скрытая дорожка скрывает надпись')
   // сохранение и миграция
   const rt = sanitizeProject(JSON.parse(JSON.stringify(edited)))
-  assert.equal(rt.version, 11)
+  assert.equal(rt.version, 12)
   const rtx = rt.items.find((i) => i.kind === 'text')
   assert.deepEqual([rtx.mediaId, rtx.plate.text, rtx.plate.size], ['', 'а\nб', 40])
   const v9 = JSON.parse(JSON.stringify(q))

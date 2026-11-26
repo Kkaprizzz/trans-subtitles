@@ -54,7 +54,7 @@ const span = (p, id) => [get(p, id).start, itemEnd(get(p, id))]
 
 // ===== новый проект и файлы =====
 let p = newProject('Тест', '2026-01-01T00:00:00Z')
-assert.equal(p.version, 11)
+assert.equal(p.version, 12)
 assert.deepEqual(p.tracks.map((t) => t.kind), ['video', 'video', 'audio'], '2 видео + 1 звук')
 assert.ok(p.tracks.every((t) => !t.muted && !t.hidden && !t.locked))
 assert.equal(p.canvas, null)
@@ -443,7 +443,7 @@ const legacy = {
   covered: { m1: [[0, 10]] }
 }
 const mig = sanitizeProject(legacy)
-assert.equal(mig.version, 11)
+assert.equal(mig.version, 12)
 assert.deepEqual(mig.tracks.map((t) => t.id), ['tv', 'tm', 'ta'])
 assert.equal(mig.tracks[1].muted, true, 'настройки дорожки сохранились')
 assert.ok(mig.tracks.every((t) => t.locked === false && t.hidden === false))

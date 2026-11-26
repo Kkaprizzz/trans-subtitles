@@ -5,7 +5,7 @@
  */
 import { shiftAll } from './project.ts'
 import { sliceEffects } from './anim.ts'
-import { itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
+import { isLayer, itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
 import type { ClipCandidate } from './clips.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -233,7 +233,7 @@ export function cropProject(p: Project, a: number, b: number): Project {
     const keys = shiftAll(it.keys, s - it.start)
     // анимации продолжаются так, будто кусок не резали: до рамки они «уже прошли», после неё «ещё не начались»
     const effects = sliceEffects(it.effects, end - it.start, s - it.start, e - it.start)
-    if (it.kind === 'freeze' || it.kind === 'text') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)), keys, effects })
+    if (it.kind === 'freeze' || isLayer(it)) items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)), keys, effects })
     else items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)), keys, effects })
   }
   return { ...p, items, markers: [], clips: [] }

@@ -4,8 +4,10 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, pasteItems, patchPlate, setPropAt, type ClipEntry } from '../../../shared/mix'
+import { addEffect, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, type ClipEntry } from '../../../shared/mix'
 import { hasKeys } from '../../../shared/anim'
+import type { ShapeKind } from '../../../shared/shape'
+import type { BannerEntry } from '../../../shared/types'
 import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
@@ -22,7 +24,6 @@ import {
   editTlText,
   insertMedia,
   itemEnd,
-  itemsOn,
   itemTrackKind,
   mediaOf,
   mergeTlWord,
@@ -48,8 +49,9 @@ import { loadCustomFont } from '../customFont'
 import ClipsDialog, { type ClipsParams } from './ClipsDialog'
 import ExportDialog from './ExportDialog'
 import Inspector from './Inspector'
-import MediaPanel from './MediaPanel'
-import Player, { type PlateStart } from './Player'
+import MediaPanel, { type LeftTab } from './MediaPanel'
+import FileView, { type FileViewHandle, type ViewFile } from './FileView'
+import Player, { type PlateStart, type ShapeEdit } from './Player'
 import type { Frame } from '../../../shared/frame'
 import Transport, { useMasterVolume } from './Transport'
 import { loadModelId, type SettingsSection } from './SettingsDialog'
@@ -193,6 +195,22 @@ export default function Editor(p: Props): React.JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const [missing, setMissing] = useState<Set<string>>(new Set())
   const [time, setTime] = useState(0)
+  // просмотр файла из «Медиа»/«Баннеры» в главном окне: проект и таймлайн не трогаются, любое действие с таймлайном закрывает
+  const [viewing, setViewing] = useState<ViewFile | null>(null)
+  const viewCtl = useRef<FileViewHandle>(null)
+  const viewingRef = useRef<ViewFile | null>(null)
+  viewingRef.current = viewing
+  const [banners, setBanners] = useState<BannerEntry[]>([])
+  const [bannerThumbs, setBannerThumbs] = useState<Record<string, string>>({})
+  const bannerThumbsFor = useRef(new Set<string>())
+  const applyBanners = useCallback((list: BannerEntry[]) => {
+    setBanners(list)
+    for (const b of list) {
+      if (b.missing || bannerThumbsFor.current.has(b.id)) continue
+      bannerThumbsFor.current.add(b.id)
+      void window.api.thumbnail(b.path, b.duration, true).then((t) => setBannerThumbs((x) => ({ ...x, [b.id]: t })), () => {})
+    }
+  }, [])
   const timeRef = useRef(0)
   timeRef.current = time
   const getTime = useCallback(() => timeRef.current, [])
@@ -214,7 +232,9 @@ export default function Editor(p: Props): React.JSX.Element {
   const [asrBusy, setAsrBusy] = useState(false)
   // «Нарезка»: выбранная рамка, фокус на рамке, окошко и ход работы
   const [selectedClip, setSelectedClip] = useState<string | null>(null)
-  const [leftTab, setLeftTab] = useState<'media' | 'fx' | 'text'>('media')
+  const [leftTab, setLeftTab] = useState<LeftTab>('media')
+  const leftTabRef = useRef<LeftTab>('media')
+  leftTabRef.current = leftTab
   const [focusClipId, setFocusClipId] = useState<string | null>(null)
   const [clipsOpen, setClipsOpen] = useState(false)
   const [clipsBusy, setClipsBusy] = useState(false)
@@ -298,7 +318,10 @@ export default function Editor(p: Props): React.JSX.Element {
   const projectRef = useRef(project)
   projectRef.current = project
 
-  const commit = useCallback((next: Project, key?: string) => dispatch({ type: 'commit', words: next, key, now: Date.now() }), [])
+  const commit = useCallback((next: Project, key?: string) => {
+    dispatch({ type: 'commit', words: next, key, now: Date.now() })
+    setViewing((v) => (v ? null : v))
+  }, [])
   const duration = projectDuration(project)
   const tlWords = useMemo<TlWord[]>(() => timelineWordRefs(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
   const layers = useMemo(() => subtitleLayers(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -325,6 +348,15 @@ export default function Editor(p: Props): React.JSX.Element {
     const it = selected.length === 1 ? project.items.find((i) => i.id === selected[0]) : undefined
     return it && hasKeys(it.keys) ? time : -1
   }, [selected, project, time]) // eslint-disable-line react-hooks/exhaustive-deps
+  // выделенная фигура: в превью её можно таскать, тянуть за ручки и поворачивать
+  const shapeItemId = useMemo(() => {
+    const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
+    return it?.kind === 'shape' ? it.id : null
+  }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
+  // выделили что-то на таймлайне — просмотр файла закрывается
+  useEffect(() => {
+    setViewing((v) => (v ? null : v))
+  }, [selected, selectedClip])
   const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
   // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
@@ -449,10 +481,12 @@ export default function Editor(p: Props): React.JSX.Element {
   useEffect(() => {
     const off = window.api.onMediaDropped((r) => {
       if (r.errors.length) p.onError(r.errors.join('; '))
-      addFiles(r.infos)
+      // на вкладке «Баннеры» брошенные файлы попадают в библиотеку, а не в проект
+      if (leftTabRef.current === 'banners') window.api.addBannerFiles(r.infos.map((i) => i.path)).then(applyBanners, (e: unknown) => p.onError(clean(e)))
+      else addFiles(r.infos)
     })
     return off
-  }, [addFiles]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [addFiles, applyBanners]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const importFiles = async (): Promise<void> => {
     try {
@@ -498,6 +532,7 @@ export default function Editor(p: Props): React.JSX.Element {
   }, [playing]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const seek = useCallback((t: number) => {
+    setViewing((v) => (v ? null : v))
     stopAtRef.current = null
     const f = focusRef.current
     const c = f ? Math.max(f.start, Math.min(t, f.end)) : Math.max(0, Math.min(t, projectDuration(projectRef.current)))
@@ -744,7 +779,9 @@ export default function Editor(p: Props): React.JSX.Element {
       }
       if (e.code === 'Space') {
         e.preventDefault()
-        togglePlay()
+        // идёт просмотр файла — пробел управляет им, а не таймлайном
+        if (viewingRef.current) viewCtl.current?.toggle()
+        else togglePlay()
       } else if (ctrl && e.code === 'KeyZ') {
         e.preventDefault()
         if (e.shiftKey) redo()
@@ -1058,18 +1095,73 @@ export default function Editor(p: Props): React.JSX.Element {
   }, [])
 
   const usedIds = useMemo(() => new Set(project.items.map((i) => i.mediaId)), [project.items])
-  /** Двойной щелчок в «Медиа»: в конец самой нижней видеодорожки (звук — в конец первой звуковой). */
-  const appendToLowest = useCallback(
-    (id: string) => {
-      const pr = projectRef.current
-      const m = pr.media.find((x) => x.id === id)
-      const lane = m?.hasVideo ? videoTracks(pr).at(-1) : pr.tracks.find((t) => t.kind === 'audio')
-      const lastItem = lane ? itemsOn(pr, lane.id).at(-1) : undefined
-      commit(insertMedia(pr, id, lastItem ? itemEnd(lastItem) : 0, lane?.id).p)
-    },
-    [commit]
-  )
   const onDropMedia = useCallback((id: string, trackId: string | null, at: number) => commit(insertMedia(projectRef.current, id, at, trackId ?? undefined).p), [commit])
+
+  // --- библиотека баннеров (общая для проектов) ---
+  useEffect(() => {
+    void window.api.listBanners().then(applyBanners, () => {})
+  }, [applyBanners])
+  const addBanners = (): void => {
+    window.api.addBanners().then(applyBanners, (e: unknown) => p.onError(clean(e)))
+  }
+  /** Баннер из библиотеки бросили на таймлайн: сначала он становится файлом проекта (если его там ещё нет), потом куском. */
+  const onDropBanner = useCallback(
+    (bannerId: string, trackId: string | null, at: number) => {
+      const b = banners.find((x) => x.id === bannerId)
+      if (!b || b.missing) return
+      let pr = projectRef.current
+      let mediaId = pr.media.find((m) => m.path === b.path)?.id
+      if (!mediaId) {
+        const r = addMedia(pr, toRef(b))
+        pr = r.p
+        mediaId = r.id
+      }
+      commit(insertMedia(pr, mediaId, at, trackId ?? undefined).p)
+    },
+    [banners, commit]
+  )
+
+  // --- фигуры ---
+  const canvasAspect = (): number => {
+    const c = projectRef.current.canvas
+    return c ? c.w / c.h : 16 / 9
+  }
+  const onDropShape = useCallback(
+    (kind: string, trackId: string | null, at: number) => {
+      const r = insertShape(projectRef.current, at, kind as ShapeKind, 3, canvasAspect(), trackId ?? undefined)
+      commit(r.p)
+      setSelected([r.id])
+      setSelectedClip(null)
+    },
+    [commit] // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  /** Щелчок по карточке фигуры: на курсор, на самую верхнюю свободную видеодорожку, как надпись. */
+  const addShapeHere = (kind: ShapeKind): void => {
+    p.onError(null)
+    onDropShape(kind, null, time)
+  }
+  /** Потянули фигуру: ось с ключами двигает ключ, ось без ключей — положение самой фигуры. */
+  const onShapeMove = (id: string, dx: number, dy: number, start: PlateStart): void => {
+    const pr = projectRef.current
+    const it = pr.items.find((i) => i.id === id)
+    if (!it || !it.shape) return
+    let next = pr
+    const patch: Partial<NonNullable<typeof it.shape>> = {}
+    if (it.keys.x.length) next = setPropAt(next, id, 'x', timeRef.current, start.x + dx)
+    else patch.x = start.px + dx
+    if (it.keys.y.length) next = setPropAt(next, id, 'y', timeRef.current, start.y + dy)
+    else patch.y = start.py + dy
+    if (Object.keys(patch).length) next = patchShape(next, id, patch)
+    commit(next, `shd-${id}`)
+  }
+  /** Размер и поворот фигуры мышью в превью. */
+  const onShapeEdit = (id: string, edit: ShapeEdit): void => commit(patchShape(projectRef.current, id, edit), `she-${id}`)
+
+  // --- просмотр файла ---
+  const viewFile = useCallback((f: ViewFile) => {
+    setPlaying(false)
+    setViewing(f)
+  }, [])
   const addTrack = (kind: 'video' | 'audio'): void => commit(addTrackOf(projectRef.current, kind).p)
   const onRemoveMedia = useCallback((id: string) => commit(removeMedia(projectRef.current, id)), [commit])
 
@@ -1174,15 +1266,23 @@ export default function Editor(p: Props): React.JSX.Element {
         previewing={previewing}
         usedIds={usedIds}
         onImport={() => void importFiles()}
-        onAppend={appendToLowest}
         onRemove={onRemoveMedia}
         tab={leftTab}
         onTab={setLeftTab}
+        onView={viewFile}
+        viewingPath={viewing?.path ?? null}
+        banners={banners}
+        bannerThumbs={bannerThumbs}
+        onBannerAdd={addBanners}
+        onBannerRemove={(id) => void window.api.removeBanner(id).then(applyBanners, (e: unknown) => p.onError(clean(e)))}
+        onBannerRename={(id, name) => void window.api.renameBanner(id, name).then(applyBanners, (e: unknown) => p.onError(clean(e)))}
+        onShape={addShapeHere}
         onEffect={(t) => applyEffect(t)}
         onText={addTextHere}
       />
 
       <section className="ed-center">
+        <div style={{ display: viewing ? 'none' : 'contents' }}>
         <Player
           project={project}
           time={time}
@@ -1198,6 +1298,9 @@ export default function Editor(p: Props): React.JSX.Element {
           clipView={clipView}
           frameItemId={frameItemId}
           plateItemId={plateItemId}
+          shapeItemId={shapeItemId}
+          onShapeMove={onShapeMove}
+          onShapeEdit={onShapeEdit}
           onPlateMove={onPlateMove}
           onFrameDrag={onFrameDrag}
           onOffset={focusClip ? (v) => commit(patchClip(projectRef.current, focusClip.id, { offsetX: v }), `co-${focusClip.id}`) : undefined}
@@ -1217,6 +1320,8 @@ export default function Editor(p: Props): React.JSX.Element {
           onToggleMute={master.toggleMute}
           info={clipView ? `1080×1920 · ${project.fps} fps` : `${project.canvas ? `${project.canvas.w}×${project.canvas.h}` : 'кадр — по первому видео'} · ${project.fps} fps`}
         />
+        </div>
+        {viewing && <FileView key={viewing.path} file={viewing} master={master} onClose={() => setViewing(null)} handle={viewCtl} />}
       </section>
 
       {(subsSel || subsSelected) && tlWords.length > 0 ? (
@@ -1325,6 +1430,8 @@ export default function Editor(p: Props): React.JSX.Element {
           onSelectTrack={setSelectedTrack}
           onCommit={commit}
           onDropMedia={onDropMedia}
+          onDropBanner={onDropBanner}
+          onDropShape={onDropShape}
           onWordPick={onWordPick}
           markerPopId={markerPopId}
           onMarkerPop={setMarkerPopId}

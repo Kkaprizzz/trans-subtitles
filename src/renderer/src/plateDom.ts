@@ -6,7 +6,7 @@ import { fontById } from '../../shared/fonts'
 import type { Plate } from '../../shared/plate'
 
 /** Применяет параметры надписи к элементу, лежащему внутри контейнера размером W×H (position: relative/absolute). */
-export function fillPlate(el: HTMLElement, plate: Plate, W: number, H: number): void {
+export function fillPlate(el: HTMLElement, plate: Plate, W: number, H: number, flip?: { h: boolean; v: boolean }): void {
   void W
   const fs = (plate.size / 100) * H
   const s = el.style
@@ -14,7 +14,8 @@ export function fillPlate(el: HTMLElement, plate: Plate, W: number, H: number): 
   s.left = `${plate.x}%`
   s.top = `${plate.y}%`
   s.width = `${plate.width}%`
-  s.transform = 'translate(-50%, -50%)'
+  // зеркало — вокруг центра блока, надпись остаётся на месте, буквы отражены
+  s.transform = flip && (flip.h || flip.v) ? `translate(-50%, -50%) scale(${flip.h ? -1 : 1}, ${flip.v ? -1 : 1})` : 'translate(-50%, -50%)'
   s.fontFamily = fontById(plate.font).family
   s.fontWeight = String(plate.weight)
   s.fontSize = `${fs.toFixed(2)}px`

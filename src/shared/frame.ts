@@ -16,14 +16,23 @@ export interface Frame {
   cb: number
   /** непрозрачность куска, % (100 — как есть) */
   opacity: number
+  /** зеркало: 1 — отражено по горизонтали / по вертикали (флаги, не анимируются) */
+  flipH: number
+  flipV: number
 }
 
-export const DEFAULT_FRAME: Frame = { scale: 100, x: 0, y: 0, cl: 0, cr: 0, ct: 0, cb: 0, opacity: 100 }
-export const FRAME_LIMITS = { scale: [10, 400], x: [-100, 100], y: [-100, 100], cl: [0, 90], cr: [0, 90], ct: [0, 90], cb: [0, 90], opacity: [0, 100] } as const
+export const DEFAULT_FRAME: Frame = { scale: 100, x: 0, y: 0, cl: 0, cr: 0, ct: 0, cb: 0, opacity: 100, flipH: 0, flipV: 0 }
+export const FRAME_LIMITS = { scale: [10, 400], x: [-100, 100], y: [-100, 100], cl: [0, 90], cr: [0, 90], ct: [0, 90], cb: [0, 90], opacity: [0, 100], flipH: [0, 1], flipV: [0, 1] } as const
 export type FrameKey = keyof Frame
 
 const clamp = (x: number, a: number, b: number): number => Math.min(b, Math.max(a, x))
 const round = (x: number): number => Math.round(x * 100) / 100
+
+/** Кадр без движения: всё по умолчанию, кроме зеркала (оно рисуется в самой картинке слоя). */
+export const isStillFrame = (f: Frame): boolean => isDefaultFrame({ ...f, flipH: 0, flipV: 0 })
+
+/** Зеркало куска для ffmpeg: фильтры после вписывания и эффектов, до кропа (кроп считается по экрану). */
+export const flipFilters = (f: Frame): string[] => [...(f.flipH ? ['hflip'] : []), ...(f.flipV ? ['vflip'] : [])]
 
 export const isDefaultFrame = (f: Frame): boolean => (Object.keys(DEFAULT_FRAME) as FrameKey[]).every((k) => f[k] === DEFAULT_FRAME[k])
 export const sameFrame = (a: Frame, b: Frame): boolean => (Object.keys(DEFAULT_FRAME) as FrameKey[]).every((k) => Math.abs(a[k] - b[k]) < 1e-6)
@@ -36,6 +45,8 @@ export function cleanFrame(raw: unknown): Frame {
     const v = Number(r[k])
     if (Number.isFinite(v)) f[k] = round(clamp(v, FRAME_LIMITS[k][0], FRAME_LIMITS[k][1]))
   }
+  f.flipH = f.flipH >= 0.5 ? 1 : 0
+  f.flipV = f.flipV >= 0.5 ? 1 : 0
   return limitCrop(f)
 }
 
@@ -54,6 +65,8 @@ export function patchFrameValues(f: Frame, patch: Partial<Frame>, prefer?: Frame
     if (Number.isFinite(v)) g[k] = round(clamp(v, FRAME_LIMITS[k][0], FRAME_LIMITS[k][1]))
   }
   // если сумма противоположных сторон превысила предел, уступает другая сторона, а не та, что двигают
+  g.flipH = g.flipH >= 0.5 ? 1 : 0
+  g.flipV = g.flipV >= 0.5 ? 1 : 0
   const lim = limitCrop(g)
   if (prefer === 'cr' || prefer === 'cb') {
     if (g.cl + g.cr > 95) lim.cr = round(95 - g.cl)

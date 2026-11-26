@@ -28,6 +28,12 @@ export interface MediaInfo {
   fps?: number
 }
 
+/** Баннер в общей библиотеке: файл на диске + название; missing — файла больше нет. */
+export interface BannerEntry extends MediaInfo {
+  id: string
+  missing: boolean
+}
+
 export type ModelId = 'gigaam-v3' | 'whisper-small' | 'whisper-turbo'
 
 export interface ModelStatus {
@@ -249,7 +255,14 @@ export interface Api {
   importProjectFile(): Promise<Project | null>
   /** диалог выбора файлов (несколько) для панели медиа */
   importMedia(): Promise<MediaInfo[]>
-  thumbnail(mediaPath: string, duration: number): Promise<string>
+  /** alpha — миниатюра PNG с прозрачностью (для баннеров), иначе JPEG */
+  thumbnail(mediaPath: string, duration: number, alpha?: boolean): Promise<string>
+  /** библиотека баннеров: список, добавить (диалог / по путям уже открытых в приложении файлов), убрать, переименовать */
+  listBanners(): Promise<BannerEntry[]>
+  addBanners(): Promise<BannerEntry[]>
+  addBannerFiles(paths: string[]): Promise<BannerEntry[]>
+  removeBanner(id: string): Promise<BannerEntry[]>
+  renameBanner(id: string, name: string): Promise<BannerEntry[]>
   /** экспорт таймлайна одним файлом (диалог «Сохранить как»); null — отмена */
   exportTimeline(p: Project, req: ExportRequest): Promise<ExportResult | null>
   pickMedia(): Promise<MediaInfo | null>

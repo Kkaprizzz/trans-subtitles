@@ -12,6 +12,8 @@ import { gainAt } from '../../../shared/audio'
 import { cssFilter } from '../../../shared/effects'
 import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
 import { fillPlate, loadPlateFont } from '../plateDom'
+import { fillShape } from '../shapeDom'
+import type { Shape } from '../../../shared/shape'
 import { activeAt, itemDur, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
 import { buildPhrases, captionAt, DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import { createCaptionView, setupStage, type CaptionView } from '../caption'
@@ -44,7 +46,14 @@ interface Props {
   plateItemId?: string | null
   /** надпись потянули мышью: сдвиг в % кадра и значения в начале движения (положение плашки и ключевые значения сдвига) */
   onPlateMove?(id: string, dx: number, dy: number, start: PlateStart): void
+  /** выделенная фигура: тащить, тянуть за ручки, поворачивать за углом */
+  shapeItemId?: string | null
+  onShapeMove?(id: string, dx: number, dy: number, start: PlateStart): void
+  onShapeEdit?(id: string, edit: ShapeEdit): void
 }
+
+/** Что мышь меняет у фигуры: центр, размер, поворот. */
+export type ShapeEdit = Partial<Pick<Shape, 'x' | 'y' | 'w' | 'h' | 'rot'>>
 
 /** Значения в момент, когда надпись схватили: положение плашки (px, py) и сдвиг по ключам/«Кадру» (x, y). */
 export interface PlateStart {
@@ -123,14 +132,14 @@ function PlateView(p: { item: Item; z: number; W: number; H: number; selected: b
   useLayoutEffect(() => {
     const el = ref.current
     if (!el || !plate) return
-    fillPlate(el, plate, p.W, p.H)
+    fillPlate(el, plate, p.W, p.H, { h: p.item.frame.flipH === 1, v: p.item.frame.flipV === 1 })
     if (p.selected && p.onMove) {
       el.style.pointerEvents = 'auto'
       el.style.cursor = 'move'
       el.style.outline = '1.5px solid var(--accent)'
       el.style.touchAction = 'none'
     }
-  }, [plate, p.W, p.H, p.selected, tick]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [plate, p.item.frame.flipH, p.item.frame.flipV, p.W, p.H, p.selected, tick]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!plate) return null
   const a = p.anim
   // обёртка во весь кадр: сдвиг в % кадра, масштаб от центра блока, прозрачность — те же значения, что считает экспорт
@@ -163,6 +172,138 @@ function PlateView(p: { item: Item; z: number; W: number; H: number; selected: b
         onPointerUp={() => (drag.current = null)}
         onPointerCancel={() => (drag.current = null)}
       />
+    </div>
+  )
+}
+
+const HANDLES: Array<{ id: string; sx: number; sy: number; cursor: string; style: React.CSSProperties }> = [
+  { id: 'nw', sx: -1, sy: -1, cursor: 'nwse-resize', style: { left: 0, top: 0 } },
+  { id: 'n', sx: 0, sy: -1, cursor: 'ns-resize', style: { left: '50%', top: 0 } },
+  { id: 'ne', sx: 1, sy: -1, cursor: 'nesw-resize', style: { left: '100%', top: 0 } },
+  { id: 'e', sx: 1, sy: 0, cursor: 'ew-resize', style: { left: '100%', top: '50%' } },
+  { id: 'se', sx: 1, sy: 1, cursor: 'nwse-resize', style: { left: '100%', top: '100%' } },
+  { id: 's', sx: 0, sy: 1, cursor: 'ns-resize', style: { left: '50%', top: '100%' } },
+  { id: 'sw', sx: -1, sy: 1, cursor: 'nesw-resize', style: { left: 0, top: '100%' } },
+  { id: 'w', sx: -1, sy: 0, cursor: 'ew-resize', style: { left: 0, top: '50%' } }
+]
+const ROT_ZONES: Array<{ id: string; style: React.CSSProperties }> = [
+  { id: 'r-nw', style: { left: 0, top: 0 } },
+  { id: 'r-ne', style: { left: '100%', top: 0 } },
+  { id: 'r-se', style: { left: '100%', top: '100%' } },
+  { id: 'r-sw', style: { left: 0, top: '100%' } }
+]
+const MIN_SHAPE_PX = 4
+
+type ShapeDrag =
+  | { mode: 'move'; x: number; y: number; start: PlateStart }
+  | { mode: 'size'; x: number; y: number; sx: number; sy: number; shape: Shape; theta: number; scale: number }
+  | { mode: 'rot'; cx: number; cy: number; a0: number; theta0: number; mirrored: boolean }
+
+/** Одна фигура в кадре: рисуется тем же кодом, что и в экспорте; у выделенной — рамка с ручками размера и зонами поворота у углов. */
+function ShapeView(p: {
+  item: Item
+  z: number
+  W: number
+  H: number
+  selected: boolean
+  anim: Anim
+  startAt: PlateStart
+  onMove?(dx: number, dy: number, start: PlateStart): void
+  onEdit?(edit: ShapeEdit): void
+}): React.JSX.Element | null {
+  const sh = p.item.shape
+  const ref = useRef<HTMLDivElement>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const drag = useRef<ShapeDrag | null>(null)
+  const flipH = p.item.frame.flipH === 1
+  const flipV = p.item.frame.flipV === 1
+  useLayoutEffect(() => {
+    if (ref.current && sh) fillShape(ref.current, sh, p.W, p.H, { h: flipH, v: flipV })
+  }, [sh, flipH, flipV, p.W, p.H])
+  if (!sh) return null
+  const a = p.anim
+  const moving = a.x !== 0 || a.y !== 0 || a.scale !== 1
+  // зеркало по одной оси переворачивает направление поворота на экране
+  const mirrored = flipH !== flipV
+  const theta = mirrored ? -sh.rot : sh.rot
+  const editable = p.selected && !!p.onEdit
+
+  const down = (e: React.PointerEvent, mode: 'move' | 'size' | 'rot', h?: { sx: number; sy: number }): void => {
+    if (!editable || e.button !== 0) return
+    e.stopPropagation()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+    if (mode === 'move') drag.current = { mode, x: e.clientX, y: e.clientY, start: p.startAt }
+    else if (mode === 'size' && h) drag.current = { mode, x: e.clientX, y: e.clientY, sx: h.sx, sy: h.sy, shape: sh, theta, scale: a.scale }
+    else {
+      const r = boxRef.current?.getBoundingClientRect()
+      if (!r) return
+      const cx = (r.left + r.right) / 2
+      const cy = (r.top + r.bottom) / 2
+      drag.current = { mode: 'rot', cx, cy, a0: Math.atan2(e.clientY - cy, e.clientX - cx), theta0: theta, mirrored }
+    }
+  }
+  const move = (e: React.PointerEvent): void => {
+    const d = drag.current
+    if (!d) return
+    if (d.mode === 'move') {
+      p.onMove?.(((e.clientX - d.x) / p.W) * 100, ((e.clientY - d.y) / p.H) * 100, d.start)
+    } else if (d.mode === 'size') {
+      // сдвиг мыши в осях самой фигуры (с учётом поворота и масштаба куска)
+      const rad = (d.theta * Math.PI) / 180
+      const dx = e.clientX - d.x
+      const dy = e.clientY - d.y
+      const lx = (dx * Math.cos(rad) + dy * Math.sin(rad)) / d.scale
+      const ly = (-dx * Math.sin(rad) + dy * Math.cos(rad)) / d.scale
+      const bw0 = (d.shape.w / 100) * p.W
+      const bh0 = (d.shape.h / 100) * p.H
+      const bw = d.sx === 0 ? bw0 : Math.max(MIN_SHAPE_PX, bw0 + d.sx * lx)
+      const bh = d.sy === 0 ? bh0 : Math.max(MIN_SHAPE_PX, bh0 + d.sy * ly)
+      // противоположная сторона стоит на месте: центр сдвигается на половину изменения размера
+      const cx = (d.sx * (bw - bw0) * d.scale) / 2
+      const cy = (d.sy * (bh - bh0) * d.scale) / 2
+      const sx = cx * Math.cos(rad) - cy * Math.sin(rad)
+      const sy = cx * Math.sin(rad) + cy * Math.cos(rad)
+      p.onEdit?.({ w: (bw / p.W) * 100, h: (bh / p.H) * 100, x: d.shape.x + (sx / p.W) * 100, y: d.shape.y + (sy / p.H) * 100 })
+    } else {
+      let t = d.theta0 + ((Math.atan2(e.clientY - d.cy, e.clientX - d.cx) - d.a0) * 180) / Math.PI
+      if (e.shiftKey) t = Math.round(t / 15) * 15
+      let rot = d.mirrored ? -t : t
+      rot = ((((rot + 180) % 360) + 360) % 360) - 180
+      p.onEdit?.({ rot })
+    }
+  }
+  const up = (): void => {
+    drag.current = null
+  }
+  return (
+    <div
+      className="pl-anim"
+      style={{
+        zIndex: p.z,
+        transformOrigin: `${sh.x}% ${sh.y}%`,
+        transform: moving ? `translate(${a.x}%, ${a.y}%) scale(${a.scale})` : undefined,
+        opacity: a.opacity < 1 ? a.opacity : undefined
+      }}
+    >
+      <div ref={ref} className="pl-shape" />
+      {editable && (
+        <div
+          ref={boxRef}
+          className="pl-shape-box"
+          style={{ left: `${sh.x}%`, top: `${sh.y}%`, width: (sh.w / 100) * p.W, height: (sh.h / 100) * p.H, transform: `translate(-50%, -50%) rotate(${theta}deg)` }}
+          onPointerDown={(e) => down(e, 'move')}
+          onPointerMove={move}
+          onPointerUp={up}
+          onPointerCancel={up}
+        >
+          {ROT_ZONES.map((z) => (
+            <span key={z.id} className="pl-rot" style={z.style} onPointerDown={(e) => down(e, 'rot')} onPointerMove={move} onPointerUp={up} onPointerCancel={up} title="Повернуть (Shift — по 15°)" />
+          ))}
+          {HANDLES.map((h) => (
+            <span key={h.id} className="pl-handle" style={{ ...h.style, cursor: h.cursor }} onPointerDown={(e) => down(e, 'size', h)} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -284,12 +425,13 @@ export default function Player(p: Props): React.JSX.Element {
           el.style.opacity = ''
         } else {
           const fit = framed ? { w: frameW, h: frameH } : fitSize(m.width ?? 0, m.height ?? 0, frameW, frameH)
-          const l = (frameW - fit.w) / 2 + (fit.w * fr.cl) / 100
-          const r = (frameW - fit.w) / 2 + (fit.w * fr.cr) / 100
-          const tp = (frameH - fit.h) / 2 + (fit.h * fr.ct) / 100
-          const b = (frameH - fit.h) / 2 + (fit.h * fr.cb) / 100
+          // кроп считается по экрану: при зеркале его стороны меняются местами (clip-path режет до отражения)
+          const l = (frameW - fit.w) / 2 + (fit.w * (fr.flipH ? fr.cr : fr.cl)) / 100
+          const r = (frameW - fit.w) / 2 + (fit.w * (fr.flipH ? fr.cl : fr.cr)) / 100
+          const tp = (frameH - fit.h) / 2 + (fit.h * (fr.flipV ? fr.cb : fr.ct)) / 100
+          const b = (frameH - fit.h) / 2 + (fit.h * (fr.flipV ? fr.ct : fr.cb)) / 100
           el.style.clipPath = fr.cl || fr.cr || fr.ct || fr.cb ? `inset(${tp.toFixed(1)}px ${r.toFixed(1)}px ${b.toFixed(1)}px ${l.toFixed(1)}px)` : ''
-          el.style.transform = `translate(${a.x}%, ${a.y}%) scale(${a.scale})`
+          el.style.transform = `translate(${a.x}%, ${a.y}%) scale(${fr.flipH ? -a.scale : a.scale}, ${fr.flipV ? -a.scale : a.scale})`
           el.style.opacity = a.opacity < 1 ? String(a.opacity) : ''
         }
       }
@@ -451,6 +593,25 @@ export default function Player(p: Props): React.JSX.Element {
                 anim={animAt(i, itemDur(i), rel)}
                 startAt={{ px: i.plate?.x ?? 50, py: i.plate?.y ?? 50, x: propAt(i, 'x', rel), y: propAt(i, 'y', rel) }}
                 onMove={p.onPlateMove ? (dx, dy, start) => p.onPlateMove?.(i.id, dx, dy, start) : undefined}
+              />
+            )
+          })}
+        {activeAt(p.project, p.time)
+          .filter((i) => i.kind === 'shape' && !hidden.has(i.trackId))
+          .map((i) => {
+            const rel = Math.min(itemDur(i), Math.max(0, p.time - i.start))
+            return (
+              <ShapeView
+                key={i.id}
+                item={i}
+                z={layerZ(trackOrder.get(i.trackId) ?? 0)}
+                W={frameW}
+                H={frameH}
+                selected={p.shapeItemId === i.id}
+                anim={animAt(i, itemDur(i), rel)}
+                startAt={{ px: i.shape?.x ?? 50, py: i.shape?.y ?? 50, x: propAt(i, 'x', rel), y: propAt(i, 'y', rel) }}
+                onMove={p.onShapeMove ? (dx, dy, start) => p.onShapeMove?.(i.id, dx, dy, start) : undefined}
+                onEdit={p.onShapeEdit ? (edit) => p.onShapeEdit?.(i.id, edit) : undefined}
               />
             )
           })}

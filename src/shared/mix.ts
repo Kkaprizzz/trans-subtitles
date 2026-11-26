@@ -7,7 +7,8 @@ import { evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKe
 import { clampParam, EFFECTS, newEffect, type EffectType } from './effects.ts'
 import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
-import { finish, fits, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
+import { DEFAULT_SHAPE_LEN, newShape, patchShapeValues, type Shape, type ShapeKind } from './shape.ts'
+import { addTrackOf, finish, fits, isLayer, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, NEW_TRACK, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
 
 const EPS = 0.02
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
@@ -313,6 +314,7 @@ export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FR
     frame: { ...DEFAULT_FRAME },
     keys: noKeys(),
     plate: null,
+    shape: null,
     link: null
   }
   return { p: finish({ ...cur, items: [...cur.items, fz] }), id: fz.id }
@@ -338,12 +340,12 @@ export function setFreezeLength(p: Project, id: string, len: number): Result {
  */
 export function canHaveEffects(p: Project, it: Item, type?: EffectType): boolean {
   if (it.kind === 'subs') return false
-  if (it.kind === 'text') return !type || !!EFFECTS[type]?.anim
+  if (isLayer(it)) return !type || !!EFFECTS[type]?.anim
   return itemTrackKind(p, it) === 'video' && !!mediaOf(p, it.mediaId)?.hasVideo
 }
 
 /** Раздел «Кадр» с кропом (масштаб, положение, кроп): куски с картинкой из файла, не надписи. */
-export const hasFrameCrop = (p: Project, it: Item): boolean => it.kind !== 'text' && canHaveEffects(p, it)
+export const hasFrameCrop = (p: Project, it: Item): boolean => !isLayer(it) && canHaveEffects(p, it)
 
 /** Накладывает эффект на куски (с настройками по умолчанию). Если такой эффект на куске уже есть, он остаётся как был. */
 export function addEffect(p: Project, ids: string[], type: EffectType): { p: Project; added: number } {
@@ -392,8 +394,8 @@ export function patchFrame(p: Project, itemId: string, patch: Partial<Frame>, pr
     items: p.items.map((i) => {
       if (i.id !== itemId || !canHaveEffects(p, i)) return i
       const frame = patchFrameValues(i.frame, patch, prefer)
-      // у надписи кропа нет
-      return { ...i, frame: i.kind === 'text' ? { ...frame, cl: 0, cr: 0, ct: 0, cb: 0 } : frame }
+      // у надписи и фигуры кропа нет
+      return { ...i, frame: isLayer(i) ? { ...frame, cl: 0, cr: 0, ct: 0, cb: 0 } : frame }
     })
   }
 }
@@ -562,6 +564,7 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
     frame: { ...DEFAULT_FRAME },
     keys: noKeys(),
     plate: newPlate(styleId, text),
+    shape: null,
     link: null
   }
   return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }
@@ -570,6 +573,58 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
 /** Меняет параметры надписи (числа зажимаются в пределы). */
 export function patchPlate(p: Project, id: string, patch: Partial<Plate>): Project {
   return { ...p, items: p.items.map((i) => (i.id === id && i.kind === 'text' && i.plate && !locked(p, i) ? { ...i, plate: patchPlateValues(i.plate, patch) } : i)) }
+}
+
+// --- фигуры ---
+
+/**
+ * Ставит фигуру на время `at` длиной len на самую верхнюю свободную видеодорожку (нет места — новая сверху), как надпись.
+ * aspect — ширина/высота кадра: круг получается круглым.
+ */
+export function insertShape(p: Project, at: number, kind: ShapeKind, len = DEFAULT_SHAPE_LEN, aspect = 16 / 9, trackId?: string): { p: Project; id: string } {
+  const start = Math.max(0, Math.floor(at * 1000 + 1e-6) / 1000)
+  const prefer = trackId ?? p.tracks.find((t) => t.kind === 'video' && !t.locked)?.id
+  const placed = trackId === NEW_TRACK ? addTrackOf(p, 'video') : placeFree(p, 'video', start, start + len, prefer)
+  const it: Item = {
+    id: uid('i'),
+    kind: 'shape',
+    mediaId: '',
+    trackId: placed.id,
+    start,
+    in: 0,
+    out: r3(len),
+    audio: false,
+    speed: 1,
+    volume: 1,
+    gain: [],
+    effects: [],
+    frame: { ...DEFAULT_FRAME },
+    keys: noKeys(),
+    plate: null,
+    shape: newShape(kind, aspect),
+    link: null
+  }
+  return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }
+}
+
+/** Меняет параметры фигуры (числа зажимаются в пределы). */
+export function patchShape(p: Project, id: string, patch: Partial<Shape>): Project {
+  return { ...p, items: p.items.map((i) => (i.id === id && i.kind === 'shape' && i.shape && !locked(p, i) ? { ...i, shape: patchShapeValues(i.shape, patch) } : i)) }
+}
+
+// --- зеркало ---
+
+/**
+ * Отзеркаливает выбранные куски с картинкой (видео, оверлеи, стоп-кадры, надписи, фигуры) по горизонтали или вертикали.
+ * Если у всех выбранных уже включено — выключает, иначе включает у всех. Возвращает, сколько кусков затронуто.
+ */
+export function toggleFlip(p: Project, ids: string[], axis: 'h' | 'v'): { p: Project; changed: number } {
+  const key = axis === 'h' ? 'flipH' : 'flipV'
+  const targets = p.items.filter((i) => ids.includes(i.id) && canHaveEffects(p, i))
+  if (targets.length === 0) return { p, changed: 0 }
+  const next = targets.every((i) => i.frame[key] === 1) ? 0 : 1
+  const set = new Set(targets.map((i) => i.id))
+  return { p: { ...p, items: p.items.map((i) => (set.has(i.id) ? { ...i, frame: { ...i.frame, [key]: next } } : i)) }, changed: targets.length }
 }
 
 // --- копирование и вставка ---
@@ -602,7 +657,7 @@ export function pasteItems(p: Project, entries: ClipEntry[], at: number): { p: P
   if (entries.length === 0) return { p, ids: [], skipped: 0 }
   const t0 = Math.min(...entries.map((e) => e.item.start))
   const shift = Math.max(0, at) - t0
-  const hasFile = (it: Item): boolean => it.kind === 'text' || !!mediaOf(p, it.mediaId)
+  const hasFile = (it: Item): boolean => isLayer(it) || !!mediaOf(p, it.mediaId)
   const idMap = new Map<string, string>()
   let cur = p
   let skipped = 0

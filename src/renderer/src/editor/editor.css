@@ -2062,3 +2062,124 @@ textarea {
   right: 0;
   clip-path: polygon(0 0, 100% 0, 100% 100%);
 }
+
+.tr-item.shape {
+  background: #3b4a2c;
+}
+
+/* фигура в кадре: рамка выделения с ручками размера и зонами поворота у углов */
+.pl-shape-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid var(--accent);
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+.pl-shape-box .pl-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  background: var(--panel);
+  border: 1.5px solid var(--accent);
+  border-radius: 2px;
+  z-index: 2;
+}
+.pl-rot {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  cursor: crosshair;
+  z-index: 1;
+}
+.pl-shape {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.flip-seg {
+  margin-top: 4px;
+}
+
+/* просмотр файла в главном окне */
+.fv-stage {
+  position: relative;
+}
+.fv-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 40px);
+  padding: 4px 6px 4px 12px;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--panel-2);
+  border-radius: var(--radius);
+  transform: translateX(-50%);
+}
+.fv-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fv-x {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--ink-2);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fv-x:hover {
+  color: var(--ink);
+  background: var(--panel-3);
+}
+.fv-frame {
+  position: absolute;
+  inset: 48px 12px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fv-video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+/* шахматка: видна прозрачность */
+.checker {
+  background: repeating-conic-gradient(#2c2c31 0% 25%, #202024 0% 50%) 0 0 / 16px 16px;
+}
+.media-thumb.checker img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.media-row.viewing {
+  background: var(--accent-soft);
+}
+.media-rename {
+  width: 100%;
+  padding: 2px 4px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.fx-swatch.shape-sw {
+  display: grid;
+  place-items: center;
+  color: var(--ink);
+  background: var(--panel-sunk);
+}

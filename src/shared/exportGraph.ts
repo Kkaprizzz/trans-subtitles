@@ -10,7 +10,7 @@
 import { animExpr, isAnimated, type Expr } from './anim.ts'
 import { gainExpr, gainPeak } from './audio.ts'
 import { effectFilters } from './effects.ts'
-import { fitSize, frameFilters, isDefaultFrame } from './frame.ts'
+import { fitSize, flipFilters, frameFilters, isStillFrame } from './frame.ts'
 import { framingChain } from './cut.ts'
 import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
@@ -34,7 +34,7 @@ export interface FramingOpt {
 
 /** Готовая картинка надписи (PNG на весь кадр) и её время на таймлайне. */
 export interface TextLayerInput {
-  /** кусок-надпись: из него берутся «Кадр», ключи и анимации (положение, масштаб, прозрачность) */
+  /** кусок-надпись или фигура: из него берутся «Кадр», ключи и анимации (положение, масштаб, прозрачность) */
   itemId?: string
   trackId: string
   path: string
@@ -184,7 +184,8 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const op = animExpr(it, len, it.start, 'T').opacity
           const ff = frameFilters(it.frame, fit.w, fit.h, moving ? ex : undefined)
           // цепочка: вписывание/кадрирование → эффекты → кроп → прозрачность → масштаб → наложение (положение от центра кадра)
-          const pre = [...fx, ...(ff ? ff.crop : [])]
+          // зеркало — сразу после эффектов, до кропа: кроп считается по тому, что видно на экране
+          const pre = [...fx, ...flipFilters(it.frame), ...(ff ? ff.crop : [])]
           const opaque = needsOpacity(op)
           const hasAlpha = !!m.hasAlpha
           const scaleSteps = ff ? ff.scale : []
@@ -257,7 +258,9 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
         graph.push(`[${k}:v]format=rgba,setpts=PTS-STARTPTS+${s}/TB[x${k}]`)
         let cur = `x${k}`
         let pos = 'x=0:y=0'
-        if (it && it.plate && (isAnimated(it) || !isDefaultFrame(it.frame))) {
+        // зеркало надписи и фигуры уже нарисовано в самой картинке слоя; здесь только движение, масштаб и прозрачность
+        const pivot = it?.plate ?? it?.shape
+        if (it && pivot && (isAnimated(it) || !isStillFrame(it.frame))) {
           const len = itemDur(it)
           const ex = animExpr(it, len, it.start, 't')
           const op = animExpr(it, len, it.start, 'T').opacity
@@ -271,8 +274,8 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
             cur = `xs${k}`
           }
           // слой во весь кадр, масштаб от центра блока (px, py — его доли кадра): левый верхний угол = центр·(1−масштаб) + сдвиг
-          const px = (it.plate.x / 100).toFixed(4)
-          const py = (it.plate.y / 100).toFixed(4)
+          const px = (pivot.x / 100).toFixed(4)
+          const py = (pivot.y / 100).toFixed(4)
           const dx = ex.x.e !== undefined ? `(${ex.x.e})/100` : String((ex.x.c ?? 0) / 100)
           const dy = ex.y.e !== undefined ? `(${ex.y.e})/100` : String((ex.y.c ?? 0) / 100)
           pos = `x='W*${px}*(1-${S})+W*${dx}':y='H*${py}*(1-${S})+H*${dy}'`

@@ -13,6 +13,7 @@ import { getPeaks } from './peaks'
 import { deleteProject, duplicateProject, exportProjectFile, importProjectFile, listProjects, readProject, writeProject } from './projectStore'
 import { exportClips, exportTimeline } from './exportTimeline'
 import { thumbnail } from './thumbs'
+import { addBanners, listBanners, removeBanner, renameBanner } from './banners'
 import { newProject, sanitizeProject, type Project } from '../shared/project'
 import { readFile as readFileAsync } from 'node:fs/promises'
 import { transcribe, transcribeRange } from './asr'
@@ -326,9 +327,61 @@ function registerIpc(): void {
     }
     return out
   })
-  ipcMain.handle('media:thumb', async (_e, mediaPath: string, duration: number) => {
+  // --- библиотека баннеров: общая для всех проектов, хранит ссылки на файлы ---
+  /** Каждый файл из библиотеки разрешён к показу окну (после перезапуска приложения тоже). */
+  const listAllowed = async (): Promise<Awaited<ReturnType<typeof listBanners>>> => {
+    const list = await listBanners()
+    for (const b of list) if (!b.missing) allowedMedia.add(b.path)
+    return list
+  }
+  ipcMain.handle('banners:list', () => listAllowed())
+  ipcMain.handle('banners:add', async () => {
+    if (!win) return listAllowed()
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Добавить баннеры',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        { name: 'Видео', extensions: ['mov', 'webm', 'mp4', 'mkv', 'avi', 'm4v'] },
+        { name: 'Все файлы', extensions: ['*'] }
+      ]
+    })
+    if (r.canceled) return listAllowed()
+    const infos: MediaInfo[] = []
+    for (const f of r.filePaths) {
+      try {
+        infos.push(await openMedia(f))
+      } catch {
+        /* нечитаемый файл пропускаем */
+      }
+    }
+    await addBanners(infos)
+    return listAllowed()
+  })
+  // файлы, брошенные в окно на вкладку «Баннеры»: путь уже прошёл через media:drop, значит разрешён
+  ipcMain.handle('banners:add-files', async (_e, paths: unknown) => {
+    const infos: MediaInfo[] = []
+    for (const f of Array.isArray(paths) ? paths : []) {
+      if (typeof f !== 'string' || !allowedMedia.has(f)) continue
+      try {
+        infos.push(await probeMedia(f))
+      } catch {
+        /* пропускаем */
+      }
+    }
+    await addBanners(infos)
+    return listAllowed()
+  })
+  ipcMain.handle('banners:remove', async (_e, id: unknown) => {
+    await removeBanner(String(id))
+    return listAllowed()
+  })
+  ipcMain.handle('banners:rename', async (_e, id: unknown, name: unknown) => {
+    await renameBanner(String(id), String(name ?? ''))
+    return listAllowed()
+  })
+  ipcMain.handle('media:thumb', async (_e, mediaPath: string, duration: number, alpha: unknown) => {
     if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
-    const t = await thumbnail(mediaPath, Number(duration) || 0)
+    const t = await thumbnail(mediaPath, Number(duration) || 0, alpha === true)
     allowedMedia.add(t)
     return t
   })

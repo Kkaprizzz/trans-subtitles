@@ -13,6 +13,7 @@ import { stat, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { join } from 'node:path'
 import type { Plate } from '../shared/plate'
+import type { Shape } from '../shared/shape'
 import { buildPhrases, captionAt, frameKey, type SubtitleStyle } from '../shared/timeline'
 import type { ProgressEvent, RenderFormat, RenderRequest, RenderResult, Word } from '../shared/types'
 import { FFMPEG } from './paths'
@@ -106,16 +107,38 @@ export async function openCaptionFrames(
   }
 }
 
-/** Одна текстовая плашка в PNG с прозрачностью (кадр W×H) — для вставки в экспорт. Окно то же, что у субтитров, одно на всё. */
-export async function renderPlatePng(plate: Plate, W: number, H: number, outPath: string): Promise<void> {
+/** Что нарисовать в слое: надпись или фигура, с зеркалом (оно рисуется внутри картинки слоя). */
+export interface LayerDraw {
+  plate?: Plate
+  shape?: Shape
+  flipH: boolean
+  flipV: boolean
+}
+
+/** Надпись или фигура в PNG с прозрачностью (кадр W×H) — для вставки в экспорт. Окно то же, что у субтитров, одно на всё. */
+export async function renderLayerPng(draw: LayerDraw, W: number, H: number, outPath: string): Promise<void> {
   const w = getWindow()
   const wc = w.webContents
   const dbg = wc.debugger
   await loadRenderPage(w)
-  await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false })
-  await dbg.sendCommand('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } })
-  await wc.executeJavaScript(`window.__plate(${JSON.stringify({ plate, W, H })})`)
-  const img = await wc.capturePage()
+  // вьюпорт и фон ставим заново при каждом слое: после загрузки страницы они сбрасываются; снимок при сбое Chromium
+  // (UnknownVizError на подряд идущих слоях) повторяем — окно одно, пересоздавать его нельзя
+  const prepare = async (): Promise<void> => {
+    await dbg.sendCommand('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false })
+    await dbg.sendCommand('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } })
+  }
+  await prepare()
+  const cfg = JSON.stringify({ plate: draw.plate, shape: draw.shape, W, H, flipH: draw.flipH, flipV: draw.flipV })
+  const draws = draw.shape ? `window.__shape(${cfg})` : `window.__plate(${cfg})`
+  await wc.executeJavaScript(draws)
+  let img = await wc.capturePage().catch(() => null)
+  for (let attempt = 0; attempt < 4 && (!img || img.isEmpty()); attempt++) {
+    await new Promise((r) => setTimeout(r, 150 * (attempt + 1)))
+    await prepare()
+    await wc.executeJavaScript(draws)
+    img = await wc.capturePage().catch(() => null)
+  }
+  if (!img) throw new Error('Не удалось нарисовать слой надписи или фигуры')
   const size = img.getSize()
   if (size.width !== W || size.height !== H) throw new Error(`Chromium отдал кадр ${size.width}×${size.height} вместо ${W}×${H}`)
   await writeFile(outPath, img.toPNG())

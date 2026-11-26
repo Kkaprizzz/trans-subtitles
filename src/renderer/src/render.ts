@@ -7,6 +7,8 @@ import { fontFamilyOf } from '../../shared/fonts'
 import { buildPhrases, captionAt, type Phrase, type SubtitleStyle } from '../../shared/timeline'
 import type { Word } from '../../shared/types'
 import type { Plate } from '../../shared/plate'
+import type { Shape } from '../../shared/shape'
+import { fillShape } from './shapeDom'
 import { createCaptionView, setupStage, type CaptionView } from './caption'
 import { fillPlate, loadPlateFont } from './plateDom'
 import { loadCustomFont } from './customFont'
@@ -23,7 +25,8 @@ declare global {
     __init(cfg: InitConfig): Promise<void>
     __frame(t: number): Promise<void>
     /** нарисовать одну текстовую плашку на прозрачном фоне кадра W×H */
-    __plate(cfg: { plate: Plate; W: number; H: number }): Promise<void>
+    __plate(cfg: { plate: Plate; W: number; H: number; flipH?: boolean; flipV?: boolean }): Promise<void>
+    __shape(cfg: { shape: Shape; W: number; H: number; flipH?: boolean; flipV?: boolean }): Promise<void>
   }
 }
 
@@ -76,6 +79,19 @@ window.__plate = async (cfg) => {
   stage.appendChild(el)
   await loadPlateFont(cfg.plate)
   await document.fonts.ready
-  fillPlate(el, cfg.plate, cfg.W, cfg.H)
+  fillPlate(el, cfg.plate, cfg.W, cfg.H, { h: !!cfg.flipH, v: !!cfg.flipV })
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+}
+
+window.__shape = async (cfg) => {
+  document.documentElement.style.background = 'transparent'
+  document.body.style.background = 'transparent'
+  const stage = document.getElementById('stage')!
+  stage.textContent = ''
+  stage.style.position = 'relative'
+  stage.style.overflow = 'hidden'
+  const el = document.createElement('div')
+  stage.appendChild(el)
+  fillShape(el, cfg.shape, cfg.W, cfg.H, { h: !!cfg.flipH, v: !!cfg.flipV })
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 }

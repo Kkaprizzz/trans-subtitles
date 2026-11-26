@@ -2,6 +2,9 @@ import assert from 'node:assert/strict'
 import { animAt, animExpr, animSet, cleanKeys, clampKeys, evalKeys, hasKeys, isAnimated, joinEffects, keysJoinGap, mergeKeys, moveKey, noKeys, setKey, shiftKeys, sliceEffects, splitKeys, ease } from './anim.ts'
 import { DEFAULT_FRAME } from './frame.ts'
 import { newEffect, cleanEffects } from './effects.ts'
+import { insertShape, patchShape, toggleFlip, canHaveEffects, hasFrameCrop } from './mix.ts'
+import { newShape, cleanShape, SHAPE_KINDS, shapeLabel } from './shape.ts'
+import { flipFilters, isStillFrame } from './frame.ts'
 import { addKeyAt, addEffect, canJoin, deleteKeyAt, disableKeys, enableKeys, frameValueAt, joinItems, moveKeyTo, patchEffect, resetFrame, setKeyEase, setPropAt, setSpeed, insertText, patchFrame } from './mix.ts'
 import { cropProject } from './cut.ts'
 import { addMedia, insertMedia, itemDur, newProject, sanitizeProject, splitItem, trimItem } from './project.ts'
@@ -259,7 +262,7 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   // сохранение и чтение
   const saved = JSON.parse(JSON.stringify(p))
   const rt = sanitizeProject(saved)
-  assert.equal(rt.version, 11)
+  assert.equal(rt.version, 12)
   assert.deepEqual(rt.items[0].keys, p.items[0].keys)
   assert.deepEqual(rt.items[0].effects.map((e) => e.type), ['fadeIn', 'fadeOut', 'blur'])
   // старый файл v10: без ключей и прозрачности
@@ -358,6 +361,94 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   // надпись без анимации и без «Кадра» — как раньше, на весь кадр
   const plain = graph(tx.p, [{ itemId: tx.id, trackId: ti.trackId, path: '/p.png', start: ti.start, end: ti.start + itemDur(ti) }])
   assert.match(plain, /overlay=x=0:y=0:format=auto/)
+}
+
+// --- фигуры и зеркало (v12)
+{
+  const { buildExport } = await import('./exportGraph.ts')
+  let p = newProject('S')
+  p = addMedia(p, V('/a.mp4', 10)).p
+  p = { ...p, canvas: { w: 1280, h: 720 } }
+  const vid = insertMedia(p, p.media[0].id, 0)
+  p = vid.p
+  // вставка: на верхнюю свободную дорожку, 3 с, круг круглый
+  const s1 = insertShape(p, 2, 'circle', 3, 1280 / 720)
+  p = s1.p
+  const it = p.items.find((i) => i.id === s1.id)
+  assert.equal(it.kind, 'shape')
+  assert.equal(it.mediaId, '')
+  assert.equal(itemDur(it), 3)
+  assert.equal(it.shape.kind, 'circle')
+  assert.ok(Math.abs((it.shape.h / 100) * 720 - (it.shape.w / 100) * 1280) < 8, 'круг: ширина и высота в пикселях близки')
+  assert.equal(newShape('frame').strokeOn, true)
+  assert.deepEqual(SHAPE_KINDS.map((k) => k.id), ['rect', 'round', 'circle', 'line', 'arrow', 'frame'])
+  assert.equal(shapeLabel(newShape('arrow')), 'Стрелка')
+  // правка: пределы, вид не меняется
+  p = patchShape(p, s1.id, { w: 999, rot: 400, h: -5, kind: 'rect' })
+  const sh = p.items.find((i) => i.id === s1.id).shape
+  assert.equal(sh.kind, 'circle')
+  assert.ok(sh.w <= 200 && sh.rot === 180 && sh.h >= 0.5)
+  // кусок-слой: эффекты только анимации, кадр без кропа, кропа нет в диалоге
+  assert.equal(canHaveEffects(p, p.items.find((i) => i.id === s1.id), 'blur'), false)
+  assert.equal(canHaveEffects(p, p.items.find((i) => i.id === s1.id), 'fadeIn'), true)
+  assert.equal(hasFrameCrop(p, p.items.find((i) => i.id === s1.id)), false)
+  // резка и файл
+  const sp = splitItem(p, s1.id, 3.5)
+  assert.equal(sp.p.items.filter((i) => i.kind === 'shape').length, 2)
+  const saved = JSON.parse(JSON.stringify(p))
+  const rt = sanitizeProject(saved)
+  assert.equal(rt.version, 12)
+  assert.equal(rt.items.find((i) => i.kind === 'shape').shape.kind, 'circle')
+  const bad = JSON.parse(JSON.stringify(p))
+  bad.items.find((i) => i.kind === 'shape').shape = { kind: 'zzz', w: 'x', fill: 'red' }
+  const fixed = sanitizeProject(bad).items.find((i) => i.kind === 'shape').shape
+  assert.equal(fixed.kind, 'rect')
+  assert.match(fixed.fill, /^#[0-9a-f]{6}$/)
+  assert.equal(cleanShape(null).kind, 'rect')
+  // зеркало: переключатель, у всех выбранных сразу; звук и субтитры не затрагиваются
+  const f1 = toggleFlip(p, [vid.id, s1.id], 'h')
+  assert.equal(f1.changed, 2)
+  assert.equal(f1.p.items.find((i) => i.id === vid.id).frame.flipH, 1)
+  assert.equal(f1.p.items.find((i) => i.id === s1.id).frame.flipH, 1)
+  const f2 = toggleFlip(f1.p, [vid.id, s1.id], 'h')
+  assert.equal(f2.p.items.find((i) => i.id === vid.id).frame.flipH, 0, 'у всех включено — выключает')
+  const mixed = toggleFlip(toggleFlip(p, [vid.id], 'v').p, [vid.id, s1.id], 'v')
+  assert.equal(mixed.p.items.find((i) => i.id === s1.id).frame.flipV, 1, 'у части включено — включает у всех')
+  assert.equal(toggleFlip(p, ['nope'], 'h').changed, 0)
+  // v11 без зеркала и фигур читается
+  const old = JSON.parse(JSON.stringify(p))
+  old.version = 11
+  for (const i of old.items) {
+    delete i.frame.flipH
+    delete i.frame.flipV
+    delete i.shape
+  }
+  old.items = old.items.filter((i) => i.kind !== 'shape')
+  const mig = sanitizeProject(old)
+  assert.equal(mig.items[0].frame.flipH, 0)
+  assert.equal(mig.items[0].shape, null)
+  assert.deepEqual(flipFilters({ ...mig.items[0].frame, flipH: 1, flipV: 1 }), ['hflip', 'vflip'])
+  assert.equal(isStillFrame({ ...mig.items[0].frame, flipH: 1 }), true, 'зеркало — не движение')
+  // экспорт: зеркало видео — сразу после эффектов, до кропа; без зеркала граф прежний
+  const graph = (pr, layers = []) => {
+    const a = buildExport(pr, { W: 1280, H: 720, fps: 30, format: 'h264', quality: 'small', subLayers: [], textLayers: layers }, '/o.mp4').args
+    return a[a.indexOf('-filter_complex') + 1]
+  }
+  assert.ok(!/hflip|vflip/.test(graph(mig)))
+  let m = patchFrame(mig, vid.id, { cl: 20 })
+  m = toggleFlip(m, [vid.id], 'h').p
+  assert.match(graph(m), /hflip,crop=iw\*0\.8/)
+  m = toggleFlip(m, [vid.id], 'v').p
+  assert.match(graph(m), /hflip,vflip,crop/)
+  // слой-фигура: зеркало нарисовано в PNG, в графе нет hflip и нет лишнего scale/overlay-выражений
+  const lay = p.items.find((i) => i.id === s1.id)
+  const fl = toggleFlip(p, [s1.id], 'h').p
+  const flGraph = graph(fl, [{ itemId: s1.id, trackId: lay.trackId, path: '/s.png', start: lay.start, end: lay.start + itemDur(lay) }])
+  assert.ok(!/hflip/.test(flGraph))
+  assert.match(flGraph, /overlay=x=0:y=0:format=auto/)
+  // кроп клипа сохраняет зеркало и фигуру
+  const cp = cropProject(fl, 1, 6)
+  assert.equal(cp.items.find((i) => i.kind === 'shape').frame.flipH, 1)
 }
 
 console.log('anim.ts: все проверки прошли')

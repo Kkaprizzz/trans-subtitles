@@ -13,7 +13,8 @@ import { animSet } from '../../../shared/anim'
 import { gainAt } from '../../../shared/audio'
 import { EFFECT_MIME, EFFECTS, type EffectType } from '../../../shared/effects'
 import { plateLabel } from '../../../shared/plate'
-import { addGainPoint, addKeysAtTime, attachAudio, canJoin, deleteGainPoint, deleteKeysAtTime, detachAudio, hasSound, insertFreeze, joinWithNeighbor, keyTimes, moveGainPoint, moveKeysAtTime, setBaseVolume, setEaseAtTime, setFreezeLength } from '../../../shared/mix'
+import { shapeLabel } from '../../../shared/shape'
+import { addGainPoint, addKeysAtTime, attachAudio, canHaveEffects, canJoin, deleteGainPoint, deleteKeysAtTime, detachAudio, hasSound, insertFreeze, joinWithNeighbor, keyTimes, moveGainPoint, moveKeysAtTime, setBaseVolume, setEaseAtTime, setFreezeLength, toggleFlip } from '../../../shared/mix'
 import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
   MARKER_COLORS,
@@ -66,6 +67,9 @@ interface Props {
   onSelectTrack(id: string | null): void
   onCommit(next: Project, key?: string): void
   onDropMedia(mediaId: string, trackId: string | null, at: number): void
+  /** бросили баннер из библиотеки / фигуру: id и вид из карточки, дорожка (null — как придётся), время */
+  onDropBanner(bannerId: string, trackId: string | null, at: number): void
+  onDropShape(kind: string, trackId: string | null, at: number): void
   onWordPick(w: TlWord): void
   /** какое окошко метки открыто */
   markerPopId: string | null
@@ -93,6 +97,9 @@ interface Props {
 }
 
 export const MEDIA_MIME = 'application/x-ts-media'
+/** карточка баннера из библиотеки (id) и карточка фигуры (вид) */
+export const BANNER_MIME = 'application/x-ts-banner'
+export const SHAPE_MIME = 'application/x-ts-shape'
 export const MARKER_PALETTE = ['#f0a35a', '#ef6a5e', '#6fcf8e', '#5bb8ec', '#b48aec', '#ecd45b']
 const HEAD = 152
 const RULER = 24
@@ -701,6 +708,12 @@ function Tracks(p: Props): React.JSX.Element {
       })
     }
     const ids = p.selected.includes(it.id) ? p.selected : [it.id]
+    if (canHaveEffects(pr, it)) {
+      out.push(
+        { label: 'Отзеркалить по горизонтали', run: () => p.onCommit(toggleFlip(pr, ids, 'h').p) },
+        { label: 'Отзеркалить по вертикали', run: () => p.onCommit(toggleFlip(pr, ids, 'v').p) }
+      )
+    }
     out.push({ label: 'Удалить', key: 'Delete', run: () => p.onCommit(deleteItems(pr, ids, false)) })
     out.push({ label: 'Удалить и закрыть дыру', key: 'Shift+Delete', run: () => p.onCommit(deleteItems(pr, ids, true)) })
     out.push({ label: 'Добавить метку', key: 'M', run: () => addMarkerAt(it.trackId, m.t) })
@@ -857,7 +870,7 @@ function Tracks(p: Props): React.JSX.Element {
       setFxOver(itemAtPoint(x, y)?.id ?? null)
       return
     }
-    if (!e.dataTransfer.types.includes(MEDIA_MIME)) return
+    if (!e.dataTransfer.types.includes(MEDIA_MIME) && !e.dataTransfer.types.includes(BANNER_MIME) && !e.dataTransfer.types.includes(SHAPE_MIME)) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
     const { x, y } = local(e)
@@ -877,13 +890,18 @@ function Tracks(p: Props): React.JSX.Element {
       return
     }
     const id = e.dataTransfer.getData(MEDIA_MIME)
+    const bannerId = e.dataTransfer.getData(BANNER_MIME)
+    const shapeKind = e.dataTransfer.getData(SHAPE_MIME)
     setDropAt(null)
-    if (!id) return
+    if (!id && !bannerId && !shapeKind) return
     e.preventDefault()
     const { x, y } = local(e)
     const r = rowAt(y)
-    const at = Math.max(0, xToTime(x, view))
-    p.onDropMedia(id, r === 'above' || r === 'below' ? NEW_TRACK : r && typeof r === 'object' ? r.track.id : null, snapTo(at, [...snapPoints(p.project), p.time], tol))
+    const at = snapTo(Math.max(0, xToTime(x, view)), [...snapPoints(p.project), p.time], tol)
+    const track = r === 'above' || r === 'below' ? NEW_TRACK : r && typeof r === 'object' ? r.track.id : null
+    if (id) p.onDropMedia(id, track, at)
+    else if (bannerId) p.onDropBanner(bannerId, track, at)
+    else p.onDropShape(shapeKind, track, at)
   }
 
   const setTrack = (t: Track, patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): void =>
@@ -1010,6 +1028,7 @@ function Tracks(p: Props): React.JSX.Element {
           const isSubs = it.kind === 'subs'
           const isFreeze = it.kind === 'freeze'
           const isText = it.kind === 'text'
+          const isShape = it.kind === 'shape'
           const onVideoTrack = row.track.kind === 'video'
           const isVideo = !isSubs && onVideoTrack && !!m?.hasVideo
           const sel = p.selected.includes(it.id)
@@ -1019,13 +1038,13 @@ function Tracks(p: Props): React.JSX.Element {
           const sound = hasSound(p.project, it)
           // у видеокуска картинка сверху, звук — узкой полосой под ней; у звукового куска всё в одном
           const picH = onVideoTrack ? PIC_H : row.h
-          const cls = `tr-item ${isSubs ? 'subs' : isVideo || isText ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${isText ? ' text' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
+          const cls = `tr-item ${isSubs ? 'subs' : isVideo || isText || isShape ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${isText ? ' text' : ''}${isShape ? ' shape' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
           // скосы «появление» и «исчезновение»: шириной в оставшуюся длительность (после резки она может быть короче)
           const anim = animSet(it.effects)
           const fadeIn = anim.fadeIn ? Math.max(0, anim.fadeIn.d - anim.fadeIn.sk) : 0
           const fadeOut = anim.fadeOut ? Math.max(0, anim.fadeOut.d - anim.fadeOut.sk) : 0
           const fxNames = it.effects.filter((e) => e.on).map((e) => EFFECTS[e.type].title.toLowerCase())
-          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : isText && it.plate ? plateLabel(it.plate) : (m?.name ?? '—')
+          const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : isText && it.plate ? plateLabel(it.plate) : isShape && it.shape ? shapeLabel(it.shape) : (m?.name ?? '—')
           const srcFrom = tlToSrc(it, visFrom)
           const srcTo = tlToSrc(it, visTo)
           const itemMenu = (e: React.MouseEvent): void => openMenu(e, (x, t, y) => ({ kind: 'item', x, y, itemId: it.id, t }), it)

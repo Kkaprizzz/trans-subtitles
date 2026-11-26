@@ -13,7 +13,7 @@ import { itemEnd, projectDuration, subtitleLayers, timelineWords, type Project }
 import { DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../shared/timeline'
 import type { ClipsExportRequest, ClipsExportResult, ExportRequest, ExportResult, ProgressEvent } from '../shared/types'
 import { FFMPEG } from './paths'
-import { renderOverlay, renderPlatePng, type CancelToken } from './render'
+import { renderLayerPng, renderOverlay, type CancelToken } from './render'
 
 const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
 
@@ -33,7 +33,7 @@ async function renderCore(p: Project, o: Core, outPath: string, emit: (e: Progre
   const layers = o.burn ? subtitleLayers(p) : []
   // надписи рисуются картинками (скрытая дорожка надпись скрывает)
   const hiddenTracks = new Set(p.tracks.filter((t) => t.hidden).map((t) => t.id))
-  const texts = p.items.filter((i) => i.kind === 'text' && i.plate && !hiddenTracks.has(i.trackId))
+  const texts = p.items.filter((i) => ((i.kind === 'text' && i.plate) || (i.kind === 'shape' && i.shape)) && !hiddenTracks.has(i.trackId))
   const tmp = layers.length > 0 || texts.length > 0 ? await mkdtemp(join(app.getPath('temp'), 'ts-subs-')) : null
   // доля шкалы прогресса, отданная на рисование слоёв субтитров
   const pre = layers.length > 0 ? 0.3 : 0
@@ -72,7 +72,7 @@ async function renderCore(p: Project, o: Core, outPath: string, emit: (e: Progre
       const it = texts[k]
       const file = join(tmp as string, `plate${k}.png`)
       emit({ stage: 'render', value: pre * (k / texts.length) * 0.2, label: `${prefix}Надписи: ${k + 1} из ${texts.length}` })
-      await renderPlatePng(it.plate as NonNullable<typeof it.plate>, o.W, o.H, file)
+      await renderLayerPng({ plate: it.plate ?? undefined, shape: it.shape ?? undefined, flipH: it.frame.flipH === 1, flipV: it.frame.flipV === 1 }, o.W, o.H, file)
       textLayers.push({ itemId: it.id, trackId: it.trackId, path: file, start: it.start, end: itemEnd(it) })
     }
     const cmd = buildExport(p, { W: o.W, H: o.H, fps: o.fps, format: o.format, quality: o.quality, subLayers, framing: o.framing, textLayers }, outPath)
