@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { addPoint, cleanPoints, gainAt, gainExpr, gainPeak, mergeGain, movePoint, splitGain } from './audio.ts'
 import { buildExport } from './exportGraph.ts'
 import { tempoFilter } from './exportGraph.ts'
-import { insertFreeze, setFreezeLength, addEffect, patchEffect, removeEffect, canHaveEffects } from './mix.ts'
+import { insertFreeze, setFreezeLength, addEffect, patchEffect, removeEffect, canHaveEffects, dropOnTimeline } from './mix.ts'
+import { NEW_TRACK } from './project.ts'
 import { effectFilters, blurSigma, sameEffects, cleanEffects, cssFilter, newEffect, EFFECT_TYPES, FILTER_TYPES, clampParam } from './effects.ts'
 import { cleanFrame, DEFAULT_FRAME, frameFilters, frameRect, isDefaultFrame, fitSize, patchFrameValues, sameFrame } from './frame.ts'
 import { patchFrame, resetFrame } from './mix.ts'
@@ -782,6 +783,61 @@ void subsOf
   const og = { W: 1280, H: 720, fps: 25, format: 'h264', quality: 'medium', subLayers: [] }
   const c = buildExport(r.p, og, '/o.mp4')
   assert.equal(c.total, 62, 'длина проекта = конец вставленной музыки (32 + 30)')
+}
+
+// --- бросок из «Медиа»: один расчёт и для показа заранее, и для настоящего броска
+{
+  let p = newProject('d')
+  const a = addMedia(p, V('/a.mp4', 10))
+  const b = addMedia(a.p, V('/b.mp4', 4))
+  const au = addMedia(b.p, V('/m.mp3', 6, { hasVideo: false, width: undefined, height: undefined, fps: undefined }))
+  p = au.p
+  const base = insertMedia(p, a.id, 0).p
+  const baseTracks = base.tracks.length
+  // свободная дорожка: кусок ложится на неё, новых дорожек нет
+  const free = dropOnTimeline(base, { kind: 'media', mediaId: b.id }, 12, base.items[0].trackId)
+  assert.ok(free)
+  const fi = free.p.items.find((i) => i.id === free.id)
+  assert.equal(fi.start, 12)
+  assert.equal(free.p.tracks.length, baseTracks, 'место свободно — новой дорожки нет')
+  assert.equal(fi.trackId, base.items[0].trackId, 'та же дорожка, куда целились')
+  // занято: кусок уходит на свободную дорожку выше, превью видит это заранее
+  const up1 = dropOnTimeline(base, { kind: 'media', mediaId: b.id }, 3, base.items[0].trackId)
+  const u1 = up1.p.items.find((i) => i.id === up1.id)
+  assert.notEqual(u1.trackId, base.items[0].trackId, 'занятая дорожка — уезжает на другую')
+  assert.equal(up1.p.tracks.length, baseTracks, 'свободная дорожка нашлась — новой нет')
+  // заняты все видеодорожки в этом месте: заводится новая
+  const full = up1.p
+  const busy = dropOnTimeline(full, { kind: 'media', mediaId: b.id }, 3, base.items[0].trackId)
+  const bi = busy.p.items.find((i) => i.id === busy.id)
+  assert.equal(busy.p.tracks.length, baseTracks + 1, 'создана новая дорожка')
+  assert.ok(!full.tracks.some((t) => t.id === bi.trackId), 'кусок лежит на новой дорожке')
+  // выше или ниже всех: новая дорожка по виду файла
+  const up = dropOnTimeline(base, { kind: 'media', mediaId: b.id }, 20, NEW_TRACK)
+  assert.equal(up.p.tracks.length, baseTracks + 1)
+  assert.equal(up.p.tracks.find((t) => t.id === up.p.items.find((i) => i.id === up.id).trackId).kind, 'video')
+  // звук на видеодорожку не ложится: уходит на звуковую
+  const snd = dropOnTimeline(base, { kind: 'media', mediaId: au.id }, 2, base.items[0].trackId)
+  assert.equal(snd.p.tracks.find((t) => t.id === snd.p.items.find((i) => i.id === snd.id).trackId).kind, 'audio')
+  // закреплённая дорожка не годится
+  const locked = setTrack(base, base.items[0].trackId, { locked: true })
+  const lk = dropOnTimeline(locked, { kind: 'media', mediaId: b.id }, 30, base.items[0].trackId)
+  assert.notEqual(lk.p.items.find((i) => i.id === lk.id).trackId, base.items[0].trackId, 'закреплённая дорожка обходится')
+  // совпадает с настоящей вставкой
+  const real = insertMedia(base, b.id, 12, base.items[0].trackId)
+  assert.deepEqual(real.p.items.find((i) => i.id === real.id).trackId, fi.trackId)
+  // баннер: файла в проекте ещё нет, он появляется вместе с куском; исходный проект не меняется
+  const ref = { path: '/banner.mov', name: 'banner.mov', duration: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720, fps: 25, needsPreview: false }
+  const bn = dropOnTimeline(base, { kind: 'banner', ref }, 15, undefined)
+  assert.ok(bn.p.media.some((m) => m.path === '/banner.mov'))
+  assert.equal(base.media.some((m) => m.path === '/banner.mov'), false, 'копия, оригинал цел')
+  near(itemDur(bn.p.items.find((i) => i.id === bn.id)), 5, 'длина баннера')
+  // фигура: 3 с
+  const sh = dropOnTimeline(base, { kind: 'shape', shape: 'rect', aspect: 16 / 9 }, 40, undefined)
+  near(itemDur(sh.p.items.find((i) => i.id === sh.id)), 3, 'длина фигуры')
+  // файл короче минимального куска класть нельзя
+  const tiny = addMedia(base, V('/t.mp4', 0.001))
+  assert.equal(dropOnTimeline(tiny.p, { kind: 'media', mediaId: tiny.id }, 1, undefined), null)
 }
 
 console.log('mix.ts, audio.ts: все проверки прошли')

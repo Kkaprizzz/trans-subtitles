@@ -12,11 +12,12 @@ import type {
   ProgressEvent
 } from '../../../shared/types'
 
-export type SettingsSection = 'asr' | 'ai' | 'export' | 'project' | 'cache' | 'updates'
+export type SettingsSection = 'asr' | 'ai' | 'export' | 'download' | 'project' | 'cache' | 'updates'
 export const SECTIONS: Array<[SettingsSection, string]> = [
   ['asr', 'Распознавание речи'],
   ['ai', 'ИИ для «Нарезки»'],
   ['export', 'Экспорт'],
+  ['download', 'Скачивание'],
   ['project', 'Новый проект'],
   ['cache', 'Кэш'],
   ['updates', 'Обновления']
@@ -259,6 +260,27 @@ export default function SettingsDialog(p: Props): React.JSX.Element {
                   </select>
                 </label>
                 <p className="hint">С этими значениями открывается окно экспорта; в нём их можно поменять для конкретного файла.</p>
+              </>
+            )}
+
+            {section === 'download' && st && (
+              <>
+                <div className="insp-row">
+                  <span>Папка</span>
+                  <span className="set-path mono" title={st.downloadDir ?? ''}>
+                    {st.downloadDir ?? 'Видео / Бобина'}
+                  </span>
+                  <span className="set-actions">
+                    <button className="btn small" onClick={() => void window.api.pickFolder('Папка для скачанных файлов').then((d) => d && void saveSt({ downloadDir: d }))}>
+                      Выбрать
+                    </button>
+                    {st.downloadDir && (
+                      <button className="btn small" onClick={() => void saveSt({ downloadDir: null })}>
+                        Сбросить
+                      </button>
+                    )}
+                  </span>
+                </div>
               </>
             )}
 

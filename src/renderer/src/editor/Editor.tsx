@@ -4,9 +4,11 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, applyFaceTrack, canHaveEffects, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry } from '../../../shared/mix'
+import { addEffect, applyFaceTrack, canHaveEffects, copyItems, dropOnTimeline, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry, type DropSpec } from '../../../shared/mix'
 import { hasKeys } from '../../../shared/anim'
 import type { ShapeKind } from '../../../shared/shape'
+import type { DragKind } from './dragState'
+import type { DlTask } from '../../../shared/download'
 import type { BannerEntry } from '../../../shared/types'
 import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
@@ -51,6 +53,7 @@ import ExportDialog from './ExportDialog'
 import Inspector from './Inspector'
 import MediaPanel, { type LeftTab } from './MediaPanel'
 import FaceDialog from './FaceDialog'
+import DownloadDialog from './DownloadDialog'
 import FileView, { type FileViewHandle, type ViewFile } from './FileView'
 import Player, { type PlateStart, type ShapeEdit } from './Player'
 import type { Frame } from '../../../shared/frame'
@@ -64,6 +67,8 @@ export interface EditorCommands {
   save(): Promise<void>
   saveToFile(): Promise<void>
   addMedia(): void
+  /** скачать по ссылке: открыть окно */
+  download(): void
   exportVideo(): void
   close(): Promise<void>
   undo(): void
@@ -231,6 +236,10 @@ export default function Editor(p: Props): React.JSX.Element {
   const [exportOpen, setExportOpen] = useState(false)
   // окно «Следить за лицом»: для какого куска открыто
   const [faceItemId, setFaceItemId] = useState<string | null>(null)
+  // скачивание по ссылке: окно, задачи (приходят из главного процесса) и картинки превью для их строк
+  const [dlOpen, setDlOpen] = useState(false)
+  const [downloads, setDownloads] = useState<DlTask[]>([])
+  const [dlThumbs, setDlThumbs] = useState<Record<string, string>>({})
   const [savedNote, setSavedNote] = useState<string | null>(null)
   // субтитры: выбранная дорожка, вкладка, слово, окошко правки в кадре, идёт ли распознавание
   const [subsSel, setSubsSel] = useState(false)
@@ -473,10 +482,10 @@ export default function Editor(p: Props): React.JSX.Element {
 
   // --- добавление файлов ---
   const addFiles = useCallback(
-    (infos: MediaInfo[]) => {
+    (infos: MediaInfo[], place = true) => {
       if (infos.length === 0) return
       let next = projectRef.current
-      const wasEmpty = next.items.length === 0
+      const wasEmpty = next.items.length === 0 && place
       const ids: string[] = []
       for (const info of infos) {
         const r = addMedia(next, toRef(info))
@@ -503,6 +512,22 @@ export default function Editor(p: Props): React.JSX.Element {
     })
     return off
   }, [addFiles, applyBanners]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // скачанное по ссылке: файл готов и открыт — кладём в библиотеку проекта, из которого качали (на таймлайн сам не встаёт)
+  useEffect(() => {
+    void window.api.dlList().then(setDownloads, () => {})
+    return window.api.onDownloads(setDownloads)
+  }, [])
+  useEffect(() => {
+    return window.api.onDownloadDone((d) => {
+      setDlThumbs((m) => {
+        if (!(d.id in m)) return m
+        const { [d.id]: _gone, ...rest } = m
+        return rest
+      })
+      if (d.projectKey === projectRef.current.id) addFiles([d.info], false)
+    })
+  }, [addFiles])
 
   const importFiles = async (): Promise<void> => {
     try {
@@ -743,7 +768,7 @@ export default function Editor(p: Props): React.JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const el = e.target as HTMLElement | null
       if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes((el as HTMLInputElement).type)))) return
-      if (exportOpen || clipsOpen || faceItemId || p.blocked) return
+      if (exportOpen || clipsOpen || faceItemId || dlOpen || p.blocked) return
       if (e.code === 'Escape' && markerPopId) {
         setMarkerPopId(null)
         return
@@ -1111,7 +1136,6 @@ export default function Editor(p: Props): React.JSX.Element {
   }, [])
 
   const usedIds = useMemo(() => new Set(project.items.map((i) => i.mediaId)), [project.items])
-  const onDropMedia = useCallback((id: string, trackId: string | null, at: number) => commit(insertMedia(projectRef.current, id, at, trackId ?? undefined).p), [commit])
 
   // --- библиотека баннеров (общая для проектов) ---
   useEffect(() => {
@@ -1120,36 +1144,52 @@ export default function Editor(p: Props): React.JSX.Element {
   const addBanners = (): void => {
     window.api.addBanners().then(applyBanners, (e: unknown) => p.onError(clean(e)))
   }
-  /** Баннер из библиотеки бросили на таймлайн: сначала он становится файлом проекта (если его там ещё нет), потом куском. */
-  const onDropBanner = useCallback(
-    (bannerId: string, trackId: string | null, at: number) => {
-      const b = banners.find((x) => x.id === bannerId)
-      if (!b || b.missing) return
-      let pr = projectRef.current
-      let mediaId = pr.media.find((m) => m.path === b.path)?.id
-      if (!mediaId) {
-        const r = addMedia(pr, toRef(b))
-        pr = r.p
-        mediaId = r.id
-      }
-      commit(insertMedia(pr, mediaId, at, trackId ?? undefined).p)
-    },
-    [banners, commit]
-  )
 
   // --- фигуры ---
   const canvasAspect = (): number => {
     const c = projectRef.current.canvas
     return c ? c.w / c.h : 16 / 9
   }
+  /**
+   * Что тащат (файл из «Медиа», баннер, фигура) → описание для расчёта. Баннер сначала становится файлом проекта
+   * (если его там ещё нет), потом куском; пропавший баннер класть нельзя.
+   */
+  const dropSpec = useCallback(
+    (kind: DragKind, id: string): DropSpec | null => {
+      if (kind === 'media') return { kind: 'media', mediaId: id }
+      if (kind === 'shape') return { kind: 'shape', shape: id as ShapeKind, aspect: canvasAspect() }
+      const b = banners.find((x) => x.id === id)
+      return b && !b.missing ? { kind: 'banner', ref: toRef(b) } : null
+    },
+    [banners] // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  /** Результат броска на копии проекта: тот же расчёт, что у настоящего (dropOnTimeline), поэтому таймлайн показывает его заранее. */
+  const previewDrop = useCallback(
+    (kind: DragKind, id: string, trackId: string | null, at: number) => {
+      const spec = dropSpec(kind, id)
+      return spec ? dropOnTimeline(projectRef.current, spec, at, trackId ?? undefined) : null
+    },
+    [dropSpec]
+  )
+  const dropNow = useCallback(
+    (kind: DragKind, id: string, trackId: string | null, at: number): string | null => {
+      const r = previewDrop(kind, id, trackId, at)
+      if (!r) return null
+      commit(r.p)
+      return r.id
+    },
+    [previewDrop, commit]
+  )
+  const onDropMedia = useCallback((id: string, trackId: string | null, at: number) => void dropNow('media', id, trackId, at), [dropNow])
+  const onDropBanner = useCallback((id: string, trackId: string | null, at: number) => void dropNow('banner', id, trackId, at), [dropNow])
   const onDropShape = useCallback(
     (kind: string, trackId: string | null, at: number) => {
-      const r = insertShape(projectRef.current, at, kind as ShapeKind, 3, canvasAspect(), trackId ?? undefined)
-      commit(r.p)
-      setSelected([r.id])
+      const id = dropNow('shape', kind, trackId, at)
+      if (!id) return
+      setSelected([id])
       setSelectedClip(null)
     },
-    [commit] // eslint-disable-line react-hooks/exhaustive-deps
+    [dropNow]
   )
   /** Щелчок по карточке фигуры: на курсор, на самую верхнюю свободную видеодорожку, как надпись. */
   const addShapeHere = (kind: ShapeKind): void => {
@@ -1219,6 +1259,7 @@ export default function Editor(p: Props): React.JSX.Element {
       }
     },
     addMedia: () => void importFiles(),
+    download: () => setDlOpen(true),
     exportVideo: () => duration > 0 && setExportOpen(true),
     close: back,
     undo,
@@ -1282,6 +1323,10 @@ export default function Editor(p: Props): React.JSX.Element {
         previewing={previewing}
         usedIds={usedIds}
         onImport={() => void importFiles()}
+        onDownload={() => setDlOpen(true)}
+        downloads={downloads.filter((t) => t.projectKey === project.id)}
+        dlThumbs={dlThumbs}
+        onDlCancel={(id) => void window.api.dlCancel(id)}
         onRemove={onRemoveMedia}
         tab={leftTab}
         onTab={setLeftTab}
@@ -1452,6 +1497,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onSelectTrack={setSelectedTrack}
           onCommit={commit}
           onDropMedia={onDropMedia}
+          previewDrop={previewDrop}
           onDropBanner={onDropBanner}
           onDropShape={onDropShape}
           onWordPick={onWordPick}
@@ -1499,6 +1545,16 @@ export default function Editor(p: Props): React.JSX.Element {
             const r = applyFaceTrack(projectRef.current, faceItemId, track, projectRef.current.canvas)
             commit(r.p)
             return { keyed: r.keyed }
+          }}
+        />
+      )}
+      {dlOpen && (
+        <DownloadDialog
+          projectKey={project.id}
+          onClose={() => setDlOpen(false)}
+          onStarted={(id, thumb) => {
+            if (thumb) setDlThumbs((m) => ({ ...m, [id]: thumb }))
+            setLeftTab('media')
           }}
         />
       )}

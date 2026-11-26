@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { Api, MediaInfo, ProgressEvent, UpdateEvent } from '../shared/types'
+import type { DlTask } from '../shared/download'
+import type { Api, DlDone, MediaInfo, ProgressEvent, UpdateEvent } from '../shared/types'
 
 type DropResult = { infos: MediaInfo[]; errors: string[] }
 const dropListeners = new Set<(r: DropResult) => void>()
@@ -101,6 +102,21 @@ const api: Api = {
     return () => ipcRenderer.removeListener('update', handler)
   },
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  dlStatus: () => ipcRenderer.invoke('dl:status'),
+  dlInfo: (url) => ipcRenderer.invoke('dl:info', url),
+  dlStart: (req) => ipcRenderer.invoke('dl:start', req),
+  dlCancel: (id) => ipcRenderer.invoke('dl:cancel', id),
+  dlList: () => ipcRenderer.invoke('dl:list'),
+  onDownloads: (cb) => {
+    const h = (_e: unknown, t: DlTask[]): void => cb(t)
+    ipcRenderer.on('downloads', h)
+    return () => ipcRenderer.removeListener('downloads', h)
+  },
+  onDownloadDone: (cb) => {
+    const h = (_e: unknown, d: DlDone): void => cb(d)
+    ipcRenderer.on('download-done', h)
+    return () => ipcRenderer.removeListener('download-done', h)
+  },
   onProgress: (cb) => {
     const handler = (_e: unknown, p: ProgressEvent): void => cb(p)
     ipcRenderer.on('progress', handler)

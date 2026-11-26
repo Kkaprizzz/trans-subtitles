@@ -28,6 +28,9 @@ import { buildPreview } from './preview'
 import { downloadModel, listModels } from './models'
 import { checkNow, installUpdate, setupUpdater } from './updater'
 import { cacheInfo, clearCache, getAppSettings, setAppSettings } from './appSettings'
+import { Downloads } from './downloads'
+import { extractInfo, maybeUpdateYtDlp, ytDlpStatus } from './ytdlp'
+import { cleanUrl, type DlRequest } from '../shared/download'
 import { disposeRenderWindow, renderOverlay, type CancelToken } from './render'
 
 // Схема media:// отдаёт в <video> только те файлы, которые пользователь сам выбрал.
@@ -332,6 +335,37 @@ function registerIpc(): void {
     }
     return out
   })
+  // --- скачивание по ссылке (yt-dlp): очередь живёт в главном процессе, окно только показывает и просит ---
+  const downloads = new Downloads({
+    folder: async () => (await getAppSettings()).downloadDir ?? join(app.getPath('videos'), 'Бобина'),
+    openFile: openMedia
+  })
+  downloads.on('changed', (tasks) => win?.webContents.send('downloads', tasks))
+  downloads.on('done', (d) => win?.webContents.send('download-done', d))
+  app.on('before-quit', () => downloads.shutdown())
+  ipcMain.handle('dl:status', async () => {
+    const st = await ytDlpStatus()
+    if (st.installed) void maybeUpdateYtDlp()
+    return st
+  })
+  ipcMain.handle('dl:info', (_e, url: unknown) => extractInfo(String(url ?? ''), send))
+  ipcMain.handle('dl:start', (_e, req: DlRequest) => {
+    const url = cleanUrl(req?.url)
+    const okKind = req?.kind === 'video' || req?.kind === 'audio'
+    if (!url || !okKind || typeof req.formatId !== 'string' || !req.formatId || req.formatId.length > 400 || typeof req.projectKey !== 'string') throw new Error('Некорректный запрос на скачивание')
+    return downloads.add({
+      projectKey: req.projectKey,
+      url,
+      title: String(req.title ?? '').slice(0, 300),
+      duration: typeof req.duration === 'number' && Number.isFinite(req.duration) ? req.duration : null,
+      kind: req.kind,
+      label: String(req.label ?? '').slice(0, 20),
+      formatId: req.formatId,
+      filesize: typeof req.filesize === 'number' && Number.isFinite(req.filesize) ? req.filesize : null
+    })
+  })
+  ipcMain.handle('dl:cancel', (_e, id: unknown) => downloads.cancel(String(id)))
+  ipcMain.handle('dl:list', () => downloads.list())
   // --- поиск лица: модель, кадр с рамками, трек по отрезку ---
   let faceAbort: AbortController | null = null
   ipcMain.handle('face:status', () => faceStatus())

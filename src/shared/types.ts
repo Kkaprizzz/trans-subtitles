@@ -1,5 +1,6 @@
 /** Общие типы для main / preload / renderer. */
 import type { ClipCandidate } from './clips'
+import type { DlInfo, DlRequest, DlTask } from './download'
 import type { FaceBox, FaceScan } from './face'
 import type { Canvas, Project } from './project'
 import type { SubtitleStyle } from './timeline'
@@ -178,6 +179,8 @@ export interface AppSettings {
   /** FPS нового проекта; 0 — по первому видео */
   newFps: number
   autoUpdate: boolean
+  /** папка для скачанных по ссылке файлов; null — «Видео/Бобина» */
+  downloadDir: string | null
 }
 
 export interface CacheInfo {
@@ -328,4 +331,28 @@ export interface Api {
   /** Состояние автообновления (приходит только в собранной версии) */
   onUpdate(cb: (e: UpdateEvent) => void): () => void
   installUpdate(): Promise<void>
+  /** Скачивание по ссылке (yt-dlp): состояние загрузчика, поиск качеств, старт, отмена */
+  dlStatus(): Promise<DlStatus>
+  /** найти ролик по ссылке; при первом разе сам скачивает загрузчик (прогресс — onProgress, stage 'download') */
+  dlInfo(url: string): Promise<DlInfo>
+  /** поставить на скачивание; id задачи */
+  dlStart(req: DlRequest): Promise<string>
+  /** отменить или убрать задачу (недокачанное удаляется) */
+  dlCancel(id: string): Promise<void>
+  dlList(): Promise<DlTask[]>
+  /** список задач при каждом изменении */
+  onDownloads(cb: (tasks: DlTask[]) => void): () => void
+  /** файл скачан и открыт: его можно добавлять в библиотеку проекта projectKey */
+  onDownloadDone(cb: (e: DlDone) => void): () => void
+}
+
+export interface DlStatus {
+  installed: boolean
+  version: string | null
+}
+
+export interface DlDone {
+  id: string
+  projectKey: string
+  info: MediaInfo
 }

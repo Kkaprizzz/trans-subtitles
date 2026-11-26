@@ -5,8 +5,10 @@ import { PLATE_STYLES } from '../../../shared/plate'
 import type { MediaRef } from '../../../shared/project'
 import { SHAPE_KINDS, type ShapeKind } from '../../../shared/shape'
 import type { BannerEntry } from '../../../shared/types'
-import { fmtTime } from '../format'
+import type { DlTask } from '../../../shared/download'
+import { fmtBytes, fmtTime } from '../format'
 import { BANNER_MIME, MEDIA_MIME, SHAPE_MIME } from './Tracks'
+import { beginDrag, endDrag } from './dragState'
 import type { ViewFile } from './FileView'
 
 export type LeftTab = 'media' | 'banners' | 'fx' | 'text' | 'shapes'
@@ -19,6 +21,12 @@ interface Props {
   previewing: Record<string, number>
   usedIds: Set<string>
   onImport(): void
+  /** скачать по ссылке: открыть окно */
+  onDownload(): void
+  /** идущие и упавшие загрузки этого проекта, картинки их превью, отмена / убрать */
+  downloads: DlTask[]
+  dlThumbs: Record<string, string>
+  onDlCancel(id: string): void
   onRemove(id: string): void
   tab: LeftTab
   onTab(t: LeftTab): void
@@ -46,6 +54,50 @@ const TABS: Array<{ id: LeftTab; label: string; d: string }> = [
   { id: 'text', label: 'Текст', d: 'M5 6h14M12 6v13M9 19h6' },
   { id: 'shapes', label: 'Фигуры', d: 'M4 4h9v9H4zM15 11a4.5 4.5 0 100 9 4.5 4.5 0 000-9z' }
 ]
+
+/** Подпись состояния загрузки под названием. */
+function dlStatusText(t: DlTask): string {
+  if (t.status === 'error') return t.error ?? 'Не скачалось'
+  if (t.status === 'queued') return t.error ? `Повторю через пару секунд · ${t.error}` : 'Ждёт очереди'
+  if (t.stage === 'post') return 'Собираю файл…'
+  const parts = [`${Math.round(t.value * 100)}%`]
+  if (t.speed) parts.push(`${fmtBytes(t.speed)}/с`)
+  if (t.eta) parts.push(`ещё ${fmtTime(t.eta).replace(/\.\d+$/, '')}`)
+  return parts.join(' · ')
+}
+
+/** Строка загрузки в «Медиа»: пока файл качается, он здесь; готовый становится обычным файлом библиотеки. */
+function DownloadRow(p: { t: DlTask; thumb?: string; onCancel(id: string): void }): React.JSX.Element {
+  const { t } = p
+  const failed = t.status === 'error'
+  return (
+    <li className={`media-row dl-row${failed ? ' failed' : ''}`} title={`${t.title} · ${t.label}\n${t.url}`}>
+      <div className="media-thumb">
+        {p.thumb ? (
+          <img src={p.thumb} alt="" draggable={false} />
+        ) : (
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 4v11M7 11l5 5 5-5M5 20h14" />
+          </svg>
+        )}
+      </div>
+      <div className="media-meta">
+        <span className="media-name">
+          {t.title} · {t.label}
+        </span>
+        <span className={`mono ${failed ? 'dl-err' : 'dim'}`}>{dlStatusText(t)}</span>
+      </div>
+      <button className="media-x on" onClick={() => p.onCancel(t.id)} title={failed ? 'Убрать' : 'Отменить загрузку'} aria-label={failed ? 'Убрать' : 'Отменить загрузку'}>
+        ×
+      </button>
+      {!failed && (
+        <span className="dl-bar" aria-hidden="true">
+          <span style={{ transform: `scaleX(${t.status === 'active' ? t.value : 0})` }} />
+        </span>
+      )}
+    </li>
+  )
+}
 
 /** Значок фигуры для карточки. */
 function ShapeGlyph({ kind }: { kind: ShapeKind }): React.JSX.Element {
@@ -86,10 +138,8 @@ function BannerRow(p: {
     <li
       className={`media-row banner-row${b.missing ? ' lost' : ''}${p.viewing ? ' viewing' : ''}`}
       draggable={!b.missing}
-      onDragStart={(e) => {
-        e.dataTransfer.setData(BANNER_MIME, b.id)
-        e.dataTransfer.effectAllowed = 'copy'
-      }}
+      onDragStart={(e) => beginDrag(e, BANNER_MIME, { kind: 'banner', id: b.id, label: b.name })}
+      onDragEnd={endDrag}
       onClick={() => !b.missing && p.onView(b)}
       title={b.missing ? `Файл не найден: ${b.path}` : `${b.path}\nЩелчок — просмотр, перетащи на таймлайн`}
     >
@@ -151,9 +201,14 @@ function MediaPanel(p: Props): React.JSX.Element {
       <div className="pane-head">
         <span>{TABS.find((t) => t.id === p.tab)?.label}</span>
         {p.tab === 'media' && (
-          <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
-            + Импорт
-          </button>
+          <span className="pane-btns">
+            <button className="btn small" onClick={p.onDownload} title="Скачать видео или музыку по ссылке">
+              Скачать
+            </button>
+            <button className="btn small" onClick={p.onImport} title="Или перетащи файлы в окно">
+              + Импорт
+            </button>
+          </span>
         )}
         {p.tab === 'banners' && (
           <button className="btn small" onClick={p.onBannerAdd} title="Или перетащи файлы в окно">
@@ -168,10 +223,8 @@ function MediaPanel(p: Props): React.JSX.Element {
               key={k.id}
               className="fx-card"
               draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(SHAPE_MIME, k.id)
-                e.dataTransfer.effectAllowed = 'copy'
-              }}
+              onDragStart={(e) => beginDrag(e, SHAPE_MIME, { kind: 'shape', id: k.id, label: k.title })}
+              onDragEnd={endDrag}
               onClick={() => p.onShape(k.id)}
               title="Щёлкни — поставить на курсор, или перетащи на таймлайн"
             >
@@ -242,7 +295,10 @@ function MediaPanel(p: Props): React.JSX.Element {
         </>
       )}
       <ul className="media-list" hidden={p.tab !== 'media'}>
-        {p.media.length === 0 && <li className="empty">Добавь видео или звук: «+ Импорт» или перетащи файлы в окно</li>}
+        {p.media.length === 0 && p.downloads.length === 0 && <li className="empty">Добавь видео или звук: «+ Импорт», «Скачать» по ссылке или перетащи файлы в окно</li>}
+        {p.downloads.map((t) => (
+          <DownloadRow key={t.id} t={t} thumb={p.dlThumbs[t.id]} onCancel={p.onDlCancel} />
+        ))}
         {p.media.map((m) => {
           const lost = p.missing.has(m.path)
           const prog = p.previewing[m.id]
@@ -251,10 +307,8 @@ function MediaPanel(p: Props): React.JSX.Element {
               key={m.id}
               className={`media-row${lost ? ' lost' : ''}${p.viewingPath === m.path ? ' viewing' : ''}`}
               draggable={!lost}
-              onDragStart={(e) => {
-                e.dataTransfer.setData(MEDIA_MIME, m.id)
-                e.dataTransfer.effectAllowed = 'copy'
-              }}
+              onDragStart={(e) => beginDrag(e, MEDIA_MIME, { kind: 'media', id: m.id, label: m.name })}
+              onDragEnd={endDrag}
               onClick={() => !lost && p.onView(m)}
               title={lost ? `Файл не найден: ${m.path}` : `${m.path}\nЩелчок — просмотр, перетащи на таймлайн`}
             >

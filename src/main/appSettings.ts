@@ -10,7 +10,8 @@ export const APP_DEFAULTS: AppSettings = {
   exportQuality: 'medium',
   newCanvas: 'first',
   newFps: 0,
-  autoUpdate: true
+  autoUpdate: true,
+  downloadDir: null
 }
 
 const file = (): string => join(app.getPath('userData'), 'app-settings.json')
@@ -35,7 +36,8 @@ function sanitize(raw: unknown): AppSettings {
     exportQuality: r.exportQuality === 'high' || r.exportQuality === 'small' ? r.exportQuality : 'medium',
     newCanvas: canvasOk ? (r.newCanvas as string) : 'first',
     newFps: typeof r.newFps === 'number' && [0, 24, 25, 30, 50, 60].includes(r.newFps) ? r.newFps : 0,
-    autoUpdate: r.autoUpdate !== false
+    autoUpdate: r.autoUpdate !== false,
+    downloadDir: typeof r.downloadDir === 'string' && r.downloadDir ? r.downloadDir : null
   }
 }
 

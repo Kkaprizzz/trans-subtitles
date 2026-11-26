@@ -45,6 +45,7 @@ import {
   type Track
 } from '../../../shared/project'
 import { fmtTime } from '../format'
+import { currentDrag, endDrag, type DragKind } from './dragState'
 
 export interface Peaks {
   pps: number
@@ -70,6 +71,8 @@ interface Props {
   /** бросили баннер из библиотеки / фигуру: id и вид из карточки, дорожка (null — как придётся), время */
   onDropBanner(bannerId: string, trackId: string | null, at: number): void
   onDropShape(kind: string, trackId: string | null, at: number): void
+  /** что получится, если бросить сюда: тот же расчёт, что у броска; null — класть нечего. Нужен, чтобы показать место заранее */
+  previewDrop(kind: DragKind, id: string, trackId: string | null, at: number): { p: Project; id: string } | null
   onWordPick(w: TlWord): void
   /** какое окошко метки открыто */
   markerPopId: string | null
@@ -132,6 +135,18 @@ function layout(tracks: Track[], clipsRow: boolean): { rows: Row[]; bottom: numb
     y += h + GAP
   }
   return { rows, bottom: y, clipsTop }
+}
+
+/** Куда ляжет то, что тащат из «Медиа»: проект с уже положенным куском (там же новая дорожка, если нужна) и его место. */
+interface DropPrev {
+  key: string
+  pp: Project
+  trackId: string
+  start: number
+  dur: number
+  label: string
+  /** время, к которому прилипло начало (null — не прилипло) */
+  snapT: number | null
 }
 
 type Drag =
@@ -355,7 +370,7 @@ function Tracks(p: Props): React.JSX.Element {
   const [view, setView] = useState<TimelineView>({ start: 0, pps: 20 })
   const [ghost, setGhost] = useState<{ id: string; trackId: string; start: number; top: number; height: number } | null>(null)
   const [fxOver, setFxOver] = useState<string | null>(null)
-  const [dropAt, setDropAt] = useState<{ x: number; top: number; height: number } | null>(null)
+  const [dropPrev, setDropPrev] = useState<DropPrev | null>(null)
   type Menu =
     | { kind: 'lane'; x: number; y: number; trackId: string; t: number }
     | { kind: 'item'; x: number; y: number; itemId: string; t: number }
@@ -412,7 +427,12 @@ function Tracks(p: Props): React.JSX.Element {
 
   const duration = projectDuration(p.project)
   const hasClips = p.project.clips.length > 0
-  const { rows, bottom, clipsTop } = useMemo(() => layout(p.project.tracks, hasClips), [p.project.tracks, hasClips])
+  // раскладка без превью нужна курсору (куда он целится); рисуем раскладку с превью: новая дорожка появляется настоящей строкой
+  const baseLayout = useMemo(() => layout(p.project.tracks, hasClips), [p.project.tracks, hasClips])
+  const { rows, bottom, clipsTop } = useMemo(
+    () => (dropPrev ? layout(dropPrev.pp.tracks, hasClips) : baseLayout),
+    [dropPrev?.key, baseLayout, hasClips] // eslint-disable-line react-hooks/exhaustive-deps
+  )
   const wordsByItem = useMemo(() => {
     const m = new Map<string, TlWord[]>()
     for (const wd of p.words) m.set(wd.itemId, [...(m.get(wd.itemId) ?? []), wd])
@@ -512,9 +532,10 @@ function Tracks(p: Props): React.JSX.Element {
   const tol = SNAP_PX / view.pps
   const rowAt = (y: number): Row | 'above' | 'below' | 'clips' | null => {
     if (y < RULER) return null
-    if (clipsTop !== null && y >= clipsTop - GAP / 2 && y < clipsTop + H_CLIPS + GAP / 2) return 'clips'
-    if (rows.length && y < rows[0].top - GAP / 2) return 'above'
-    for (const r of rows) if (y >= r.top - GAP / 2 && y < r.top + r.h + GAP / 2) return r
+    const { rows: bRows, clipsTop: bClips } = baseLayout
+    if (bClips !== null && y >= bClips - GAP / 2 && y < bClips + H_CLIPS + GAP / 2) return 'clips'
+    if (bRows.length && y < bRows[0].top - GAP / 2) return 'above'
+    for (const r of bRows) if (y >= r.top - GAP / 2 && y < r.top + r.h + GAP / 2) return r
     return 'below'
   }
 
@@ -524,6 +545,20 @@ function Tracks(p: Props): React.JSX.Element {
     const stop = (e: WheelEvent): void => e.preventDefault()
     el.addEventListener('wheel', stop, { passive: false })
     return () => el.removeEventListener('wheel', stop)
+  }, [])
+
+  // бросок мимо таймлайна и отмена по Esc: превью убираем, описание перетаскиваемого забываем
+  useEffect(() => {
+    const clear = (): void => {
+      setDropPrev(null)
+      endDrag()
+    }
+    window.addEventListener('dragend', clear)
+    window.addEventListener('drop', clear)
+    return () => {
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('drop', clear)
+    }
   }, [])
 
   // меню закрывается по щелчку мимо
@@ -870,13 +905,29 @@ function Tracks(p: Props): React.JSX.Element {
       setFxOver(itemAtPoint(x, y)?.id ?? null)
       return
     }
-    if (!e.dataTransfer.types.includes(MEDIA_MIME) && !e.dataTransfer.types.includes(BANNER_MIME) && !e.dataTransfer.types.includes(SHAPE_MIME)) return
+    const types = e.dataTransfer.types
+    const kind: DragKind | null = types.includes(MEDIA_MIME) ? 'media' : types.includes(BANNER_MIME) ? 'banner' : types.includes(SHAPE_MIME) ? 'shape' : null
+    if (!kind) return
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
+    const d = currentDrag(kind)
+    if (!d) return
+    // то же, что делает бросок: дорожка под курсором, начало прилипает к краям кусков, меткам и курсору
     const { x, y } = local(e)
     const r = rowAt(y)
-    const row = r && typeof r === 'object' ? r : null
-    setDropAt({ x, top: row ? row.top : r === 'above' ? (rows[0]?.top ?? RULER + 8) - 6 : bottom - GAP, height: row ? row.h : 6 })
+    const raw = Math.max(0, xToTime(x, view))
+    const at = snapTo(raw, [...snapPoints(p.project), p.time], tol)
+    const track = r === 'above' || r === 'below' ? NEW_TRACK : r && typeof r === 'object' ? r.track.id : null
+    const res = p.previewDrop(kind, d.id, track, at)
+    const it = res?.p.items.find((i) => i.id === res.id)
+    if (!res || !it) {
+      setDropPrev(null)
+      return
+    }
+    const snapT = Math.abs(at - raw) > 1e-9 ? at : null
+    const dur = itemDur(it)
+    const key = `${it.trackId}|${it.start}|${dur}|${res.p.tracks.length}|${snapT}`
+    setDropPrev((prev) => (prev && prev.key === key ? prev : { key, pp: res.p, trackId: it.trackId, start: it.start, dur, label: d.label, snapT }))
   }
   const onDrop = (e: React.DragEvent): void => {
     const fx = e.dataTransfer.getData(EFFECT_MIME)
@@ -892,7 +943,8 @@ function Tracks(p: Props): React.JSX.Element {
     const id = e.dataTransfer.getData(MEDIA_MIME)
     const bannerId = e.dataTransfer.getData(BANNER_MIME)
     const shapeKind = e.dataTransfer.getData(SHAPE_MIME)
-    setDropAt(null)
+    setDropPrev(null)
+    endDrag()
     if (!id && !bannerId && !shapeKind) return
     e.preventDefault()
     const { x, y } = local(e)
@@ -924,8 +976,10 @@ function Tracks(p: Props): React.JSX.Element {
   const popRow = popMarker ? rows.find((r) => r.track.id === popMarker.trackId) : undefined
 
   return (
-    <div className="tracks" onDragOver={onDragOver} onDragLeave={() => {
-        setDropAt(null)
+    <div className="tracks" onDragOver={onDragOver} onDragLeave={(e) => {
+        // переход между дочерними элементами тоже даёт dragleave: убираем превью, только когда курсор ушёл с таймлайна
+        if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+        setDropPrev(null)
         setFxOver(null)
       }} onDrop={onDrop}>
       <div className="tr-heads" style={{ width: HEAD }}>
@@ -946,7 +1000,7 @@ function Tracks(p: Props): React.JSX.Element {
               style={{ top: r.top, height: r.h }}
               onPointerDown={() => p.onSelectTrack(t.id)}
             >
-              <span className="tr-name">{trackName(p.project, t.id)}</span>
+              <span className="tr-name">{trackName(dropPrev ? dropPrev.pp : p.project, t.id)}</span>
               <span className="tr-tools">
                 <button onClick={() => addMarkerAt(t.id, p.time)} title="Поставить метку на курсоре (M)" aria-label="Добавить метку">
                   <Svg d={I.flag} />
@@ -1153,7 +1207,25 @@ function Tracks(p: Props): React.JSX.Element {
         {ghost && ghostItem && (
           <div className="tr-ghost" style={{ left: timeToX(ghost.start, view), width: Math.max(2, itemDur(ghostItem) * view.pps), top: ghost.top, height: ghost.height }} />
         )}
-        {dropAt && <div className="tr-drop" style={{ left: dropAt.x, top: dropAt.top, height: dropAt.height }} />}
+        {dropPrev &&
+          (() => {
+            const row = rows.find((rr) => rr.track.id === dropPrev.trackId)
+            if (!row) return null
+            const width = Math.max(2, dropPrev.dur * view.pps)
+            return (
+              <>
+                {dropPrev.snapT !== null && <div className="tr-snap" style={{ left: Math.round(timeToX(dropPrev.snapT, view)), top: RULER, height: Math.max(h, bottom) - RULER }} />}
+                <div className={`tr-drop-prev${width < 64 ? ' narrow' : ''}`} style={{ left: timeToX(dropPrev.start, view), width, top: row.top, height: row.h }}>
+                  <span className="tr-dp-text">
+                    <span className="tr-dp-name">{dropPrev.label}</span>
+                    <span className="tr-dp-time mono">
+                      {fmtTime(dropPrev.start)} · {dropPrev.dur.toFixed(1)} с
+                    </span>
+                  </span>
+                </div>
+              </>
+            )
+          })()}
         {playX >= -1 && playX <= w + 1 && (
           <div className="tr-playhead" style={{ left: Math.round(playX), height: Math.max(h, bottom) }}>
             <span />

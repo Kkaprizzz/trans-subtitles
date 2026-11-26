@@ -9,7 +9,7 @@ import { DEFAULT_FRAME, fitSize, patchFrameValues, sameFrame, type Frame, type F
 import { faceAt, sameFace, type FaceTrack } from './face.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
 import { DEFAULT_SHAPE_LEN, newShape, patchShapeValues, type Shape, type ShapeKind } from './shape.ts'
-import { addTrackOf, finish, fits, isLayer, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, NEW_TRACK, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
+import { addMedia, addTrackOf, finish, fits, insertMedia, isLayer, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, NEW_TRACK, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type MediaRef, type Project, type TrackKind } from './project.ts'
 
 const EPS = 0.02
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
@@ -645,6 +645,21 @@ export function insertShape(p: Project, at: number, kind: ShapeKind, len = DEFAU
     link: null
   }
   return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }
+}
+
+/** Что бросили на таймлайн из панелей: файл проекта, баннер из библиотеки (ещё не файл проекта) или фигуру. */
+export type DropSpec = { kind: 'media'; mediaId: string } | { kind: 'banner'; ref: Omit<MediaRef, 'id'> } | { kind: 'shape'; shape: ShapeKind; aspect: number }
+
+/**
+ * Что получится, если бросить на таймлайн в точку at. Один расчёт и для настоящего броска, и для показа заранее на копии
+ * проекта: куда ляжет кусок, занято ли, нужна ли новая дорожка. trackId: дорожка под курсором, NEW_TRACK — выше или ниже
+ * всех, undefined — как придётся. null — класть нечего (файл короче минимального куска).
+ */
+export function dropOnTimeline(p: Project, spec: DropSpec, at: number, trackId?: string): { p: Project; id: string } | null {
+  if (spec.kind === 'shape') return insertShape(p, at, spec.shape, DEFAULT_SHAPE_LEN, spec.aspect, trackId)
+  const base = spec.kind === 'banner' ? addMedia(p, spec.ref) : { p, id: spec.mediaId }
+  const r = insertMedia(base.p, base.id, at, trackId)
+  return r.id ? r : null
 }
 
 /** Меняет параметры фигуры (числа зажимаются в пределы). */

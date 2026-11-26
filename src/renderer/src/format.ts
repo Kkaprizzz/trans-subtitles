@@ -15,3 +15,17 @@ export function plural(n: number, one: string, few: string, many: string): strin
   if (b >= 2 && b <= 4) return few
   return many
 }
+
+/** 64_800_000 -> «62 МБ», 1_500_000_000 -> «1,4 ГБ». */
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 Б'
+  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i += 1
+  }
+  const s = v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace('.', ',').replace(/,0$/, '')
+  return `${s} ${units[i]}`
+}
