@@ -50,12 +50,12 @@ export const EFFECTS: Record<EffectType, EffectInfo> = {
   blur: {
     title: 'Блюр',
     description: 'Размывает картинку куска',
-    params: [{ key: 'strength', title: 'Сила', min: 0, max: 100, default: 50 }]
+    params: [{ key: 'strength', title: 'Сила', min: 0, max: 100, default: 50, unit: '%' }]
   },
   bw: {
     title: 'Чёрно-белый',
     description: 'Убирает цвет: от лёгкого до полного',
-    params: [{ key: 'strength', title: 'Сила', min: 0, max: 100, default: 100 }]
+    params: [{ key: 'strength', title: 'Сила', min: 0, max: 100, default: 100, unit: '%' }]
   },
   color: {
     title: 'Цветокоррекция',

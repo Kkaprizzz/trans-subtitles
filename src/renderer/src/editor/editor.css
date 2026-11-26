@@ -752,9 +752,12 @@ textarea {
   flex-direction: column;
 }
 .insp-body {
-  padding: 4px 14px 14px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px 16px;
   display: grid;
-  gap: 12px;
+  align-content: start;
+  gap: 10px;
   overflow-y: auto;
 }
 .insp-title {
@@ -2182,4 +2185,202 @@ textarea {
   place-items: center;
   color: var(--ink);
   background: var(--panel-sunk);
+}
+
+/* --- инспектор: название куска, вкладки, поля --- */
+.insp-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.insp-tabs button {
+  padding: 8px 8px 9px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease);
+}
+.insp-tabs button:hover {
+  color: var(--ink-2);
+}
+.insp-tabs button.on {
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.insp-tabs button i {
+  margin-left: 4px;
+  font-style: normal;
+  color: var(--ink-3);
+}
+.insp-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.fld-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px 10px;
+}
+.fld-pair select {
+  width: 100%;
+  min-width: 0;
+}
+.fld {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.fld.wide {
+  grid-template-columns: 92px minmax(0, 1fr) 62px 20px;
+}
+.fld.nokf {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.fld.wide.nokf {
+  grid-template-columns: 92px minmax(0, 1fr) 62px;
+}
+.fld.nokf .fld-label {
+  min-width: 48px;
+}
+.fld-label {
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+.fld-label:hover {
+  color: var(--ink);
+}
+.fld-num {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0 7px;
+  background: var(--panel-sunk);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+}
+.fld-num:focus-within {
+  border-color: var(--accent);
+}
+.fld-num input {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  font-size: 12px;
+  text-align: right;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+.fld-num i {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.fld-range {
+  min-width: 0;
+}
+.fld.color-fld {
+  grid-template-columns: auto minmax(0, 1fr);
+  cursor: default;
+}
+.fld.color-fld.wide {
+  grid-template-columns: 92px minmax(0, 1fr);
+}
+.fld.color-fld input[type='color'] {
+  width: 100%;
+  height: 26px;
+}
+
+/* эффекты и анимации: свёрнутые строки */
+.fxr-list {
+  display: grid;
+  gap: 2px;
+}
+.fxr {
+  background: var(--panel-sunk);
+  border-radius: var(--radius);
+}
+.fxr.off .fx-title {
+  opacity: 0.45;
+}
+.fxr-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+}
+.fxr-main {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 4px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.fxr-main .fx-title {
+  font-weight: 600;
+}
+.fxr-sum {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fxr.open .fxr-sum {
+  opacity: 0;
+}
+.fxr-body {
+  display: grid;
+  gap: 8px;
+  padding: 2px 12px 12px 30px;
+}
+.fx-none {
+  margin: 0;
+  font-size: 12px;
+}
+.btn.ghost.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fxr-head .fx-eye,
+.fxr-head .fx-del {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  flex: none;
+}
+.fxr.off .fx-eye {
+  color: var(--ink-3);
 }

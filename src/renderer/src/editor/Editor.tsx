@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, type ClipEntry } from '../../../shared/mix'
+import { addEffect, canHaveEffects, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry } from '../../../shared/mix'
 import { hasKeys } from '../../../shared/anim'
 import type { ShapeKind } from '../../../shared/shape'
 import type { BannerEntry } from '../../../shared/types'
@@ -129,11 +129,16 @@ interface Layout {
   th: number
 }
 const LAYOUT_KEY = 'layout-v1'
-const LAYOUT_DEFAULT: Layout = { mw: 260, iw: 300, th: 300 }
+const LAYOUT_DEFAULT: Layout = { mw: 260, iw: 340, th: 300 }
 function loadLayout(): Layout {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY)
-    if (raw) return { ...LAYOUT_DEFAULT, ...(JSON.parse(raw) as Partial<Layout>) }
+    if (raw) {
+      const l = { ...LAYOUT_DEFAULT, ...(JSON.parse(raw) as Partial<Layout>) }
+      // раньше умолчание было 300: если ширину не меняли, берём новую
+      if (l.iw === 300) l.iw = LAYOUT_DEFAULT.iw
+      return l
+    }
   } catch {
     /* умолчания */
   }
@@ -186,7 +191,9 @@ const I = {
   gear: 'M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2.2.3-1.3-1.3L17 4.8 14 4l-1 2h-2l-1-2-3 .8.5 2.2-1.3 1.3L5 8l-1 3 2 1v0l-2 1 1 3 2.2-.3 1.3 1.3L7 19.2l3 .8 1-2h2l1 2 3-.8-.5-2.2 1.3-1.3 2.2.3 1-3z',
   out: 'M12 15V3M7 8l5-5 5 5M5 14v6h14v-6',
   freeze: 'M4 5h16v14H4zM10 9v6M14 9v6',
-  text: 'M5 6h14M12 6v13M9 19h6'
+  text: 'M5 6h14M12 6v13M9 19h6',
+  flipH: 'M12 3v18M10 7l-6 5 6 5zM14 7l6 5-6 5z',
+  flipV: 'M3 12h18M7 10l5-6 5 6zM7 14l5 6 5-6z'
 }
 
 export default function Editor(p: Props): React.JSX.Element {
@@ -357,6 +364,12 @@ export default function Editor(p: Props): React.JSX.Element {
   useEffect(() => {
     setViewing((v) => (v ? null : v))
   }, [selected, selectedClip])
+  // зеркало выделенных кусков с картинкой (кнопки на панели инструментов): неактивны без таких кусков, нажаты, когда включено у всех
+  const flipState = useMemo(() => {
+    const items = selected.map((id) => project.items.find((i) => i.id === id)).filter((i): i is NonNullable<typeof i> => !!i && canHaveEffects(project, i))
+    return { can: items.length > 0, h: items.length > 0 && items.every((i) => i.frame.flipH === 1), v: items.length > 0 && items.every((i) => i.frame.flipV === 1) }
+  }, [selected, project])
+  const flipSel = (axis: 'h' | 'v'): void => commit(toggleFlip(projectRef.current, selected, axis).p)
   const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
   // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
@@ -1379,6 +1392,12 @@ export default function Editor(p: Props): React.JSX.Element {
           </button>
           <button className="btn ghost" onClick={() => addTextHere()} title="Поставить надпись на курсор на 3 с">
             <Icon d={I.text} /> Текст
+          </button>
+          <button className={`btn icon ghost${flipState.h ? ' on' : ''}`} onClick={() => flipSel('h')} disabled={!flipState.can} aria-pressed={flipState.h} title="Отзеркалить по горизонтали" aria-label="Отзеркалить по горизонтали">
+            <Icon d={I.flipH} />
+          </button>
+          <button className={`btn icon ghost${flipState.v ? ' on' : ''}`} onClick={() => flipSel('v')} disabled={!flipState.can} aria-pressed={flipState.v} title="Отзеркалить по вертикали" aria-label="Отзеркалить по вертикали">
+            <Icon d={I.flipV} />
           </button>
           <button className="btn ghost" onClick={() => del(false)} disabled={selected.length === 0} title="Удалить выделенное, дыра остаётся (Delete). Shift+Delete — удалить и закрыть дыру">
             <Icon d={I.del} /> Удалить
