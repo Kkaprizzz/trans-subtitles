@@ -67,12 +67,12 @@ jobs:
           ELECTRON_DISABLE_SANDBOX: '1'
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q xvfb
-          xvfb-run -a node scripts/ci-smoke.mjs release/linux-unpacked/trans-subtitles
+          xvfb-run -a node scripts/ci-smoke.mjs release/linux-unpacked/bobina
 
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: node scripts/ci-smoke.mjs "release/win-unpacked/Trans Subtitles.exe"
+        run: node scripts/ci-smoke.mjs "release/win-unpacked/bobina.exe"
 
       - name: Package (and publish on tag)
         shell: bash

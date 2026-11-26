@@ -67,7 +67,7 @@ export async function duplicateProject(id: string): Promise<Project> {
 /** Импорт: новый id, чтобы не затереть свой проект с тем же id. */
 export async function importProjectFile(path: string): Promise<Project> {
   const p = sanitizeProject(JSON.parse(await readFile(path, 'utf8')))
-  if (!p) throw new Error('Это не файл проекта Trans Subtitles или он повреждён')
+  if (!p) throw new Error('Это не файл проекта Бобины или он повреждён')
   return writeProject({ ...p, id: uid('p'), createdAt: p.createdAt || new Date().toISOString() })
 }
 

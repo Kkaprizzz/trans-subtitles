@@ -1,6 +1,7 @@
 /** «Справка»: горячие клавиши и «О программе». */
 import { useEffect, useState } from 'react'
 import type { AppInfo } from '../../../shared/types'
+import { BrandMark } from '../BrandMark'
 
 export const HOTKEYS: Array<[string, Array<[string, string]>]> = [
   [
@@ -123,7 +124,8 @@ export function AboutDialog({ onClose }: { onClose(): void }): React.JSX.Element
           </button>
         </div>
         <div className="modal-body">
-          <p className="about-name">Trans Subtitles</p>
+          <BrandMark size={56} style={{ color: 'var(--accent)', display: 'block', marginBottom: 10 }} />
+          <p className="about-name">Бобина</p>
           <p className="dim">Монтаж, субтитры и нарезка коротких роликов. Распознавание речи — на этом компьютере.</p>
           <p className="mono dim">
             Версия {info?.version ?? '…'}

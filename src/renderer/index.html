@@ -7,13 +7,21 @@
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: media:; font-src 'self' data: font:; media-src 'self' media:; connect-src 'self' ws://localhost:* http://localhost:*"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Trans Subtitles</title>
+    <title>Бобина</title>
     <!-- Заставка рисуется ещё до загрузки интерфейса: только HTML и CSS -->
     <link rel="stylesheet" href="/src/splash.css" />
   </head>
   <body>
     <div id="splash" role="status" aria-live="polite">
-      <div class="splash-cap" aria-label="Trans Subtitles"><span>Trans</span> <span>Subtitles</span></div>
+      <div class="splash-brand">
+        <svg class="splash-mark" viewBox="0 0 100 100" fill="none" stroke="#1fc8d6" aria-hidden="true">
+          <circle class="draw" pathLength="1" cx="34" cy="36" r="20" stroke-width="10" />
+          <path class="draw" pathLength="1" d="M34 56V70Q34 80 44 80H94" stroke-width="8" />
+          <path class="draw" pathLength="1" d="M54 92H80" stroke-width="8" />
+          <circle class="dot" cx="34" cy="36" r="4" fill="#1fc8d6" stroke="none" />
+        </svg>
+        <div class="splash-word" aria-label="Бобина"><span aria-hidden="true">Бобина</span></div>
+      </div>
       <div class="splash-foot">
         <span id="splash-status">Загружаю интерфейс</span>
         <span>v%VITE_APP_VERSION%</span>

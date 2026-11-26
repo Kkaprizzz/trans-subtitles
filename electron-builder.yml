@@ -1,5 +1,5 @@
 appId: app.kkaprizzz.transsubtitles
-productName: Trans Subtitles
+productName: Бобина
 copyright: Kkaprizzz
 directories:
   output: release
@@ -32,7 +32,8 @@ linux:
   category: AudioVideo
   # связывает окно с ярлыком (значок в панели задач)
   syncDesktopName: true
-  artifactName: Trans-Subtitles-${version}-linux-x64.${ext}
+  executableName: bobina
+  artifactName: Bobina-${version}-linux-x64.${ext}
   files:
     - "!**/node_modules/ffprobe-static/bin/{darwin,win32}/**"
     - "!**/node_modules/ffprobe-static/bin/linux/ia32/**"
@@ -45,7 +46,8 @@ win:
   target:
     - target: nsis
       arch: x64
-  artifactName: Trans-Subtitles-${version}-win-x64-setup.${ext}
+  executableName: bobina
+  artifactName: Bobina-${version}-win-x64-setup.${ext}
   files:
     - "!**/node_modules/ffprobe-static/bin/{darwin,linux}/**"
     - "!**/node_modules/ffprobe-static/bin/win32/ia32/**"

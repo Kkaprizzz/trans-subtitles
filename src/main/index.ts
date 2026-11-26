@@ -3,6 +3,10 @@ import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { Readable } from 'node:stream'
+
+// Приложение переименовано в «Бобину», но данные (проекты, ключ ИИ, модели, кэш) остаются в прежней папке
+// «Trans Subtitles»: Electron берёт папку от productName. Чужой --user-data-dir (тесты) не трогаем.
+if (!app.commandLine.hasSwitch('user-data-dir')) app.setPath('userData', join(app.getPath('appData'), 'Trans Subtitles'))
 import { CUSTOM_EXT } from '../shared/fonts'
 import { analyzeClips, windowCharsForTpm } from '../shared/clipsAnalyze'
 import { slug } from '../shared/cut'
@@ -101,12 +105,12 @@ function createWindow(): void {
     height: 840,
     minWidth: 1000,
     minHeight: 640,
-    backgroundColor: '#0d0d0f',
+    backgroundColor: '#0e0e10',
     // своя верхняя строка с кнопками окна (как в CapCut): системную рамку убираем
     frame: false,
     // показываем после первой отрисовки: сразу с заставкой, без пустого окна
     show: false,
-    title: 'Trans Subtitles',
+    title: 'Бобина',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -288,7 +292,7 @@ function registerIpc(): void {
     const r = await dialog.showSaveDialog(win, {
       title: 'Экспорт проекта',
       defaultPath: join(app.getPath('documents'), `${slug(p.name) || 'Проект'}.tsproj`),
-      filters: [{ name: 'Проект Trans Subtitles', extensions: ['tsproj'] }]
+      filters: [{ name: 'Проект Бобины', extensions: ['tsproj'] }]
     })
     if (r.canceled || !r.filePath) return null
     const out = r.filePath.endsWith('.tsproj') ? r.filePath : `${r.filePath}.tsproj`
@@ -300,11 +304,11 @@ function registerIpc(): void {
     const r = await dialog.showOpenDialog(win, {
       title: 'Импорт проекта',
       properties: ['openFile'],
-      filters: [{ name: 'Проект Trans Subtitles', extensions: ['tsproj', 'json'] }]
+      filters: [{ name: 'Проект Бобины', extensions: ['tsproj', 'json'] }]
     })
     if (r.canceled || !r.filePaths[0]) return null
     const raw = JSON.parse(await readFileAsync(r.filePaths[0], 'utf8')) as unknown
-    if (!sanitizeProject(raw)) throw new Error('Это не файл проекта Trans Subtitles или он повреждён')
+    if (!sanitizeProject(raw)) throw new Error('Это не файл проекта Бобины или он повреждён')
     return importProjectFile(r.filePaths[0])
   })
   ipcMain.handle('media:import', async () => {

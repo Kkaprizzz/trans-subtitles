@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="#1fc8d6" stroke-linecap="butt">
+  <!-- Бобина, направление «Лента»: кольцо катушки, лента уходит вправо строкой -->
+  <circle cx="34" cy="36" r="20" stroke-width="10"/>
+  <path d="M34 56V70Q34 80 44 80H94" stroke-width="8"/>
+  <path d="M54 92H80" stroke-width="8"/>
+  <circle cx="34" cy="36" r="4" fill="#1fc8d6" stroke="none"/>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- значок для 16 и 32 px: толще штрихи, без короткой строки, которая на таком размере слипается -->
+  <rect width="512" height="512" rx="112" fill="#0e0e10"/>
+  <g transform="translate(76 76) scale(3.6)" fill="none" stroke="#1fc8d6" stroke-linecap="butt">
+    <circle cx="34" cy="36" r="20" stroke-width="14"/>
+    <path d="M34 56V70Q34 80 44 80H94" stroke-width="12"/>
+    <circle cx="34" cy="36" r="4" fill="#1fc8d6" stroke="none"/>
+  </g>
+</svg>

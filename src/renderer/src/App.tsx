@@ -11,6 +11,7 @@ import MenuBar, { type Menu } from './editor/MenuBar'
 import SettingsDialog, { type SettingsSection } from './editor/SettingsDialog'
 import StartScreen from './editor/StartScreen'
 import { hideSplash, splashStep } from './splash'
+import { BrandMark } from './BrandMark'
 
 type Dialog = null | { kind: 'settings'; section: SettingsSection } | { kind: 'hotkeys' } | { kind: 'about' }
 const clean = (e: unknown): string => (e instanceof Error ? e.message : String(e)).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
@@ -213,12 +214,10 @@ export default function App(): React.JSX.Element {
           title={inEditor ? 'К списку проектов (Ctrl+W)' : undefined}
           aria-label="К списку проектов"
         >
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M5 7h14M5 12h9M5 17h11" />
-          </svg>
+          <BrandMark size={16} />
         </button>
         <MenuBar menus={menus} />
-        <span className="app-title">{inEditor ? ed.name : 'Trans Subtitles'}</span>
+        <span className="app-title">{inEditor ? ed.name : 'Бобина'}</span>
         <span className="spacer" />
         {inEditor && ed.status && <span className={`app-status${ed.statusErr ? ' warn' : ' dim'}`}>{ed.status}</span>}
         {inEditor && ed.cancellable && (
