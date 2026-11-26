@@ -3,7 +3,7 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { finish, itemEnd, itemTrackKind, mediaOf, placeFree, subsOf, trackOf, uid, type Item, type Project } from './project.ts'
+import { finish, itemEnd, itemTrackKind, MAX_SPEED, MIN_SPEED, mediaOf, placeFree, subsOf, tlToSrc, trackOf, uid, type Item, type Project } from './project.ts'
 
 const EPS = 0.02
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
@@ -53,6 +53,7 @@ export function attachAudio(p: Project, soundId: string): Result {
   const v = candidates.reduce((a, b) => (Math.abs(b.start - s.start) < Math.abs(a.start - s.start) ? b : a))
   if (locked(p, v)) return { p, error: 'Дорожка видео закреплена: открепи её' }
   const back: Item = { ...v, audio: true, volume: s.volume, gain: s.gain }
+  // скорость берётся у видео: звук возвращается в его темп
   return { p: finish({ ...p, items: p.items.filter((x) => x.id !== s.id).map((x) => (x.id === v.id ? back : x)) }) }
 }
 
@@ -67,6 +68,7 @@ export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (Math.abs(a.out - b.in) > EPS) return 'Это не соседние отрезки файла: между ними вырезан кусок'
   if (Math.abs(itemEnd(a) - b.start) > EPS) return 'Между кусками есть пустое место или они наехали друг на друга'
   if (a.audio !== b.audio) return 'У одного звук отделён, у другого прикреплён'
+  if (Math.abs(a.speed - b.speed) > 1e-6) return 'У кусков разная скорость'
   return null
 }
 
@@ -173,7 +175,7 @@ export function setBaseVolume(p: Project, id: string, v: number): Project {
 export function addGainPoint(p: Project, id: string, tl: number, v?: number): { p: Project; index: number } {
   const it = find(p, id)
   if (!editable(p, it)) return { p, index: -1 }
-  const t = Math.min(it.out, Math.max(it.in, it.in + (tl - it.start)))
+  const t = Math.min(it.out, Math.max(it.in, tlToSrc(it, tl)))
   const r = addPoint(it.gain, it.volume, t, v)
   return r.index < 0 ? { p, index: -1 } : { p: put(p, { ...it, gain: r.points }), index: r.index }
 }
@@ -182,7 +184,7 @@ export function addGainPoint(p: Project, id: string, tl: number, v?: number): { 
 export function moveGainPoint(p: Project, id: string, index: number, tl: number, v: number): Project {
   const it = find(p, id)
   if (!editable(p, it)) return p
-  return put(p, { ...it, gain: movePoint(it.gain, index, it.in + (tl - it.start), v, it.in, it.out) })
+  return put(p, { ...it, gain: movePoint(it.gain, index, tlToSrc(it, tl), v, it.in, it.out) })
 }
 
 /** Убирает точку. Последняя точка уходит — линия становится ровной на её уровне. */
@@ -196,5 +198,37 @@ export function deleteGainPoint(p: Project, id: string, index: number): Project 
 
 /** Итоговый уровень куска в момент t таймлайна (для предпросмотра и проверок). */
 export function itemGainAt(it: Item, tl: number): number {
-  return gainAt(it.gain, it.volume, r3(it.in + (tl - it.start)))
+  return gainAt(it.gain, it.volume, r3(tlToSrc(it, tl)))
+}
+
+// --- скорость ---
+
+export const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4]
+export const clampSpeed = (v: number): number => Math.min(MAX_SPEED, Math.max(MIN_SPEED, Math.round((Number.isFinite(v) ? v : 1) * 100) / 100))
+
+/**
+ * Скорость выделенных кусков видео и звука. Длина кусков на таймлайне меняется, поэтому всё, что стоит правее на той же
+ * дорожке (и метки этой дорожки), сдвигается на разницу. Куски на других дорожках не трогаются; связанные субтитры
+ * идут за своим видео. Закреплённая дорожка — отказ.
+ */
+export function setSpeed(p: Project, ids: string[], value: number): Result {
+  const speed = clampSpeed(value)
+  const targets = p.items.filter((i) => ids.includes(i.id) && i.kind === 'media' && Math.abs(i.speed - speed) > 1e-6)
+  if (targets.length === 0) return { p }
+  if (targets.some((i) => locked(p, i))) return { p, error: 'Дорожка закреплена: открепи её' }
+  const changed = new Map(targets.map((i) => [i.id, i]))
+  const dur = (i: Item, s: number): number => (i.out - i.in) / s
+  // разница длины каждого изменённого куска и его старый конец — по дорожкам
+  const byTrack = new Map<string, Array<{ end: number; delta: number }>>()
+  for (const it of targets) {
+    byTrack.set(it.trackId, [...(byTrack.get(it.trackId) ?? []), { end: itemEnd(it), delta: dur(it, speed) - dur(it, it.speed) }])
+  }
+  const shift = (trackId: string, t: number): number => (byTrack.get(trackId) ?? []).reduce((d, x) => (t >= x.end - EPS ? d + x.delta : d), 0)
+  const items = p.items.map((i) => {
+    if (changed.has(i.id)) return { ...i, speed, start: r3(Math.max(0, i.start + shift(i.trackId, i.start))) }
+    if (!byTrack.has(i.trackId) || (i.kind === 'subs' && i.link)) return i
+    return { ...i, start: r3(Math.max(0, i.start + shift(i.trackId, i.start))) }
+  })
+  const markers = p.markers.map((m) => (byTrack.has(m.trackId) ? { ...m, t: r3(Math.max(0, m.t + shift(m.trackId, m.t))) } : m))
+  return { p: finish({ ...p, items, markers }) }
 }

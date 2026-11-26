@@ -1,6 +1,7 @@
 /** Инспектор: свойства выделенного куска или, если ничего не выделено, — проекта. */
 import { memo, useState } from 'react'
 import { deleteClip, patchClip, placement } from '../../../shared/cut'
+import { clampSpeed, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
 import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, unlinkSubs, type Clip, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
@@ -13,6 +14,8 @@ interface Props {
   /** открыть окошко метки на таймлайне */
   onMarkerPop(id: string | null): void
   /** выбранная рамка клипа (тогда показываем её свойства) */
+  /** сообщение пользователю (почему не вышло) */
+  onMessage(msg: string): void
   clip: Clip | null
   onFocusClip(id: string): void
   onClipGone(): void
@@ -83,7 +86,6 @@ function ClipPanel(p: { project: Project; clip: Clip; onCommit(next: Project, ke
             <span className="mono">{Math.round(c.offsetX * 100)}%</span>
           </label>
         )}
-        {c.framing === 'crop' && <p className="hint">В режиме фокуса кадр можно двигать мышью прямо в превью.</p>}
         <label className="check">
           <input type="checkbox" checked={c.enabled} onChange={(e) => patch({ enabled: e.target.checked })} />
           <span>Экспортировать этот клип</span>
@@ -128,6 +130,61 @@ function ClipPanel(p: { project: Project; clip: Clip; onCommit(next: Project, ke
   )
 }
 
+/** Скорость выделенных кусков видео и звука: число 0.25–4× и пресеты; у нескольких разных кусков — «разное». */
+function SpeedRow(p: { project: Project; ids: string[]; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element | null {
+  const items = p.project.items.filter((i) => p.ids.includes(i.id) && i.kind === 'media')
+  const speeds = [...new Set(items.map((i) => i.speed))]
+  const shown = speeds.length === 1 ? String(speeds[0]) : ''
+  const [text, setText] = useState(shown)
+  // выделение или значение сменились снаружи — поле показывает актуальное
+  const sig = `${p.ids.join(',')}|${shown}`
+  const [seen, setSeen] = useState(sig)
+  if (seen !== sig) {
+    setSeen(sig)
+    setText(shown)
+  }
+  if (items.length === 0) return null
+  const apply = (v: number): void => {
+    const r = setSpeed(p.project, items.map((i) => i.id), v)
+    if (r.error) p.onMessage(r.error)
+    else p.onCommit(r.p)
+    setText(String(clampSpeed(v)))
+  }
+  return (
+    <div className="insp-col">
+      <span>Скорость{speeds.length > 1 ? ' · у кусков разная' : ''}</span>
+      <div className="speed-row">
+        <input
+          type="text"
+          inputMode="decimal"
+          className="mono"
+          value={text}
+          placeholder="разное"
+          aria-label="Скорость, от 0.25 до 4"
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => {
+            const v = Number(text.replace(',', '.'))
+            if (text.trim() === '' || !Number.isFinite(v)) setText(shown)
+            else if (Math.abs(v - Number(shown)) > 1e-9 || speeds.length > 1) apply(v)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+            e.stopPropagation()
+          }}
+        />
+        <span className="dim">×</span>
+      </div>
+      <div className="speed-presets" role="group" aria-label="Скорость, пресеты">
+        {SPEED_PRESETS.map((v) => (
+          <button key={v} className={speeds.length === 1 && speeds[0] === v ? 'on' : ''} onClick={() => apply(v)}>
+            {v}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Inspector(p: Props): React.JSX.Element {
   const pr = p.project
   if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
@@ -159,6 +216,7 @@ function Inspector(p: Props): React.JSX.Element {
             <dt>Дорожка</dt>
             <dd>{track ? trackName(pr, track.id) : '—'}</dd>
           </dl>
+          <SpeedRow project={pr} ids={[one.id]} onCommit={p.onCommit} onMessage={p.onMessage} />
           {subsOf(pr, one.id).length > 0 && (
             <div className="insp-link">
               <span className="dim">Субтитры едут вместе с этим видео</span>
@@ -167,7 +225,6 @@ function Inspector(p: Props): React.JSX.Element {
               </button>
             </div>
           )}
-          <p className="hint">S — разрезать по курсору, Delete — удалить, Ctrl+J — соединить, правый щелчок — меню (в нём отделение звука). Громкость — линия на звуке куска.</p>
         </div>
       </aside>
     )
@@ -181,6 +238,7 @@ function Inspector(p: Props): React.JSX.Element {
         <span>{p.selected.length > 1 ? `Выделено кусков: ${p.selected.length}` : 'Проект'}</span>
       </div>
       <div className="insp-body">
+        {p.selected.length > 1 && <SpeedRow project={pr} ids={p.selected} onCommit={p.onCommit} onMessage={p.onMessage} />}
         <label className="insp-row">
           <span>Название</span>
           <input type="text" value={pr.name} onChange={(e) => p.onCommit({ ...pr, name: e.target.value.slice(0, 120) }, 'name')} />
@@ -224,7 +282,6 @@ function Inspector(p: Props): React.JSX.Element {
         </dl>
         <div className="insp-markers">
           <span className="set-h">Метки · {pr.markers.length}</span>
-          {pr.markers.length === 0 && <p className="hint">Метка ставится клавишей M, правым щелчком по дорожке или кнопкой ⚑ в шапке дорожки.</p>}
           <ul>
             {pr.markers.map((m) => (
               <li

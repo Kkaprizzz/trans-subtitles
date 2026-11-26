@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { addPoint, cleanPoints, gainAt, gainExpr, gainPeak, mergeGain, movePoint, splitGain } from './audio.ts'
 import { buildExport } from './exportGraph.ts'
+import { tempoFilter } from './exportGraph.ts'
+import { cropProject, orderedClips, placement, makeClip, sourceAt } from './cut.ts'
+import { setSpeed, clampSpeed } from './mix.ts'
 import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, itemGainAt, joinItems, joinSelected, joinWithNeighbor, moveGainPoint, neighbors, setBaseVolume } from './mix.ts'
-import { addMedia, addSubtitles, applyRecognized, insertMedia, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, trimItem, videoTracks } from './project.ts'
+import { addMarker, addMedia, addSubtitles, applyRecognized, insertMedia, itemDur, itemEnd, moveItem, newProject, sanitizeProject, setTrack, splitAt, splitItem, subsOf, subtitleLayers, tlToSrc, trimItem, videoTracks } from './project.ts'
 
 const V = (path, duration, extra = {}) => ({ path, name: path, duration, hasVideo: true, hasAudio: true, width: 1280, height: 720, fps: 25, needsPreview: false, ...extra })
 const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-3, `${msg}: ${a} != ${b}`)
@@ -224,7 +227,7 @@ for (const it of v5.items) {
   it.volume = 0.5
 }
 const mig = sanitizeProject(v5)
-assert.equal(mig.version, 6)
+assert.equal(mig.version, 7)
 const mv = mig.items.find((i) => i.mediaId === ma)
 assert.deepEqual([mv.audio, mv.volume, mv.gain], [true, 0.5, []], 'звук прикреплён, уровень сохранён')
 assert.equal(mig.items.find((i) => i.mediaId === mus).audio, true)
@@ -237,5 +240,135 @@ assert.deepEqual(sanitizeProject(dirty).items.find((i) => i.id === ia.id).gain, 
 assert.equal(sanitizeProject(det.p).items.find((i) => i.id === ia.id).audio, false, 'отделённый звук сохраняется')
 assert.equal(videoTracks(p).length >= 2, true)
 void subsOf
+
+// === скорость ===
+{
+  let q = newProject('С')
+  q = addMedia(q, V('/a.mp4', 20)).p
+  q = addMedia(q, V('/b.mp4', 10)).p
+  const [qa, qb] = q.media.map((m) => m.id)
+  const a1 = insertMedia(q, qa, 0)
+  q = a1.p
+  const b1 = insertMedia(q, qb, 20, q.items.find((i) => i.id === a1.id).trackId)
+  q = b1.p
+  const trackV = q.items.find((i) => i.id === a1.id).trackId
+  assert.equal(q.items.find((i) => i.id === b1.id).start, 20, 'второй идёт сразу за первым на одной дорожке')
+  const mk = addMarker(q, trackV, 25, 0, '').p
+  q = mk
+  const other = insertMedia(q, qb, 0)
+  q = other.p
+  assert.notEqual(q.items.find((i) => i.id === other.id).trackId, trackV)
+
+  // длина и пересчёт времени
+  const at2 = setSpeed(q, [a1.id], 2)
+  assert.ok(!at2.error)
+  const x2 = at2.p.items.find((i) => i.id === a1.id)
+  assert.equal(x2.speed, 2)
+  near(itemDur(x2), 10, 'вдвое быстрее — вдвое короче')
+  near(itemEnd(x2), 10, 'конец')
+  near(tlToSrc(x2, 5), 10, 'пятая секунда таймлайна = десятая файла')
+  near(at2.p.items.find((i) => i.id === b1.id).start, 10, 'следующий сдвинулся влево на разницу')
+  near(at2.p.markers[0].t, 15, 'метка этой дорожки тоже')
+  near(at2.p.items.find((i) => i.id === other.id).start, 0, 'куски на других дорожках не тронуты')
+  // медленнее: сдвиг вправо, на пресеты и зажим
+  const slow = setSpeed(q, [a1.id], 0.5)
+  near(itemDur(slow.p.items.find((i) => i.id === a1.id)), 40, 'вдвое медленнее — вдвое длиннее')
+  near(slow.p.items.find((i) => i.id === b1.id).start, 40, 'сосед уехал вправо')
+  assert.equal(setSpeed(q, [a1.id], 9).p.items.find((i) => i.id === a1.id).speed, 4, 'не быстрее 4×')
+  assert.equal(setSpeed(q, [a1.id], 0.01).p.items.find((i) => i.id === a1.id).speed, 0.25, 'не медленнее 0.25×')
+  assert.equal(clampSpeed(1.2345), 1.23)
+  assert.equal(setSpeed(q, [a1.id], 1).p, q, 'то же значение — ничего не меняется')
+  assert.match(setSpeed(setTrack(q, trackV, { locked: true }), [a1.id], 2).error, /закреплена/)
+  // несколько кусков на одной дорожке: сдвиги копятся
+  const both = setSpeed(q, [a1.id, b1.id], 2)
+  near(both.p.items.find((i) => i.id === b1.id).start, 10)
+  near(itemEnd(both.p.items.find((i) => i.id === b1.id)), 15, 'второй: 10 с файла ÷ 2')
+  // вернулись к 1 — всё как было
+  const back1 = setSpeed(at2.p, [a1.id], 1)
+  assert.deepEqual(back1.p.items.map((i) => [i.id, i.start, i.speed]).sort(), q.items.map((i) => [i.id, i.start, i.speed]).sort())
+  assert.deepEqual(back1.p.markers.map((m) => m.t), [25])
+
+  // резка и подрезка с учётом скорости
+  const sp = splitItem(at2.p, a1.id, 4) // 4-я секунда таймлайна = 8-я файла
+  const L = sp.p.items.find((i) => i.id === a1.id)
+  const R = sp.p.items.find((i) => i.id === sp.id)
+  near(L.out, 8, 'левая часть до 8 с файла')
+  near(R.in, 8)
+  assert.equal(L.speed + R.speed, 4)
+  near(itemEnd(L), 4)
+  near(itemEnd(R), 10, 'правая часть кончается там же, где кончался кусок')
+  assert.ok(joinItems(sp.p, a1.id, sp.id).error === undefined, 'склейка при той же скорости')
+  const diffSpeed = setSpeed(sp.p, [sp.id], 1)
+  assert.match(joinItems(diffSpeed.p, a1.id, sp.id).error ?? '', /скорость/, 'при разной скорости не склеить')
+  const tr = trimItem(at2.p, a1.id, 'end', 6) // конец на 6-й секунде таймлайна = 12-я файла
+  near(tr.items.find((i) => i.id === a1.id).out, 12)
+  const trs = trimItem(at2.p, a1.id, 'start', 2)
+  near(trs.items.find((i) => i.id === a1.id).in, 4)
+  near(trs.items.find((i) => i.id === a1.id).start, 2)
+  // начало нельзя сдвинуть левее начала файла: при 2× влево помещается in/speed
+  const left0 = trimItem(trs, a1.id, 'start', 0)
+  near(left0.items.find((i) => i.id === a1.id).in, 0)
+
+  // субтитры идут в темпе видео
+  let sb = applyRecognized(q, qa, 0, 20, [{ id: 0, text: 'раз', start: 4, end: 6 }, { id: 1, text: 'два', start: 12, end: 14 }])
+  sb = addSubtitles(sb, [a1.id])
+  const sbFast = setSpeed(sb, [a1.id], 2).p
+  const sv = sbFast.items.find((i) => i.kind === 'subs')
+  assert.equal(sv.speed, 2, 'связанные субтитры взяли скорость видео')
+  assert.deepEqual(subtitleLayers(sbFast).flatMap((l) => l.words.map((w) => [w.text, w.start, w.end])), [['раз', 2, 3], ['два', 6, 7]], 'слова сжались вдвое')
+
+  // рамки «Нарезки»
+  let cl = { ...at2.p, clips: [makeClip(qa, 4, 12)] }
+  const pl = placement(cl, cl.clips[0])
+  near(pl.start, 2)
+  near(pl.end, 6, 'рамка из 8 с файла при 2× занимает 4 с')
+  near(sourceAt(cl, qa, 3), 6)
+  const cp = cropProject(cl, 2, 6)
+  const ci = cp.items.find((i) => i.mediaId === qa)
+  assert.deepEqual([ci.start, ci.in, ci.out, ci.speed], [0, 4, 12, 2])
+
+  // экспорт: время кадров, atempo, громкость до смены темпа
+  const opts2 = { W: 1280, H: 720, fps: 25, format: 'h264', quality: 'medium', subLayers: [] }
+  const gx = (pr) => {
+    const c = buildExport(pr, opts2, '/o.mp4')
+    return { g: c.args[c.args.indexOf('-filter_complex') + 1], total: c.total, args: c.args }
+  }
+  const e2 = gx(at2.p)
+  near(e2.total, 20, 'длина экспорта: первый 10 с, второй 10 с')
+  assert.match(e2.g, /setpts=\(PTS-STARTPTS\)\/2\.0000\+0\.000\/TB,fps=25/, 'картинка: время сжато, потом fps')
+  assert.match(e2.g, /atempo=2\.0000/, 'звук: atempo')
+  const ia2 = e2.args.indexOf('/a.mp4')
+  assert.deepEqual(e2.args.slice(ia2 - 5, ia2), ['-ss', '0.000', '-t', '20.000', '-i'], 'вход режется по файлу')
+  assert.match(gx(slow.p).g, /atempo=0\.5000/)
+  assert.doesNotMatch(gx(q).g, /atempo/, 'на скорости 1 всё как раньше')
+  assert.match(gx(q).g, /fps=25,setpts=PTS-STARTPTS/)
+  assert.equal(tempoFilter(0.25), 'atempo=0.5000,atempo=0.5000')
+  assert.equal(tempoFilter(4), 'atempo=2.0000,atempo=2.0000')
+  assert.equal(tempoFilter(0.75), 'atempo=0.7500')
+  assert.equal(tempoFilter(1), '')
+  const withLine = addGainPoint(at2.p, a1.id, 5, 0.3).p
+  assert.match(gx(withLine).g, /volume='if\(lt\(t,[\d.]+\)[^']*':eval=frame,atempo=2\.0000/, 'громкость до atempo')
+
+  // отдельный звук хранит свою скорость; возврат берёт скорость видео
+  const dv = detachAudio(at2.p, a1.id)
+  assert.equal(dv.p.items.find((i) => i.id === dv.id).speed, 2, 'отделённый звук унаследовал скорость')
+  const dvSlow = setSpeed(dv.p, [a1.id], 1).p
+  assert.equal(dvSlow.items.find((i) => i.id === dv.id).speed, 2, 'смена скорости видео звук не трогает')
+  assert.equal(attachAudio(dvSlow, dv.id).p.items.find((i) => i.id === a1.id).speed, 1, 'вернули — темп видео')
+
+  // сохранение и миграция
+  const saved = sanitizeProject(JSON.parse(JSON.stringify(at2.p)))
+  assert.equal(saved.items.find((i) => i.id === a1.id).speed, 2)
+  assert.equal(saved.version, 7)
+  const v6 = JSON.parse(JSON.stringify(q))
+  v6.version = 6
+  for (const it of v6.items) delete it.speed
+  assert.ok(sanitizeProject(v6).items.every((i) => i.speed === 1), 'старые проекты: скорость 1')
+  const wild = JSON.parse(JSON.stringify(q))
+  wild.items[0].speed = 99
+  wild.items[1].speed = -3
+  assert.deepEqual(sanitizeProject(wild).items.slice(0, 2).map((i) => i.speed), [4, 0.25], 'значения зажаты в 0.25–4')
+  void orderedClips
+}
 
 console.log('mix.ts, audio.ts: все проверки прошли')

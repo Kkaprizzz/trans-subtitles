@@ -3,7 +3,7 @@
  * поэтому едет за видео; где она стоит на таймлайне, считает placement. Для экспорта проект обрезается под рамку
  * (cropProject), и дальше работает обычный экспорт таймлайна.
  */
-import { itemEnd, MIN_CLIP, MIN_ITEM, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
+import { itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
 import type { ClipCandidate } from './clips.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -60,13 +60,19 @@ export interface Placement {
   itemId: string
 }
 
+/** Куски файла, из которых рамка берёт картинку: звук, отделённый от видео, лежит на звуковой дорожке и не в счёт. */
+function mediaItems(p: Project, mediaId: string): Item[] {
+  const hasVideo = !!mediaOf(p, mediaId)?.hasVideo
+  return p.items.filter((i) => i.kind === 'media' && i.mediaId === mediaId && (!hasVideo || itemTrackKind(p, i) === 'video'))
+}
+
 /**
  * Куски файла рамки, которых она касается. Если файл лежит на таймлайне несколькими отдельными местами,
  * берём то место (цепочку впритык лежащих кусков), где пересечение с рамкой больше всего.
  */
 export function placement(p: Project, c: Clip): Placement | null {
-  const hit = p.items
-    .filter((i) => i.kind === 'media' && i.mediaId === c.mediaId && i.in < c.end - 1e-6 && i.out > c.start + 1e-6)
+  const hit = mediaItems(p, c.mediaId)
+    .filter((i) => i.in < c.end - 1e-6 && i.out > c.start + 1e-6)
     .sort((a, b) => a.start - b.start)
   if (hit.length === 0) return null
   const overlap = (i: Item): number => Math.min(i.out, c.end) - Math.max(i.in, c.start)
@@ -79,8 +85,8 @@ export function placement(p: Project, c: Clip): Placement | null {
   const best = chains.reduce((a, b) => (b.reduce((n, i) => n + overlap(i), 0) > a.reduce((n, i) => n + overlap(i), 0) ? b : a))
   const first = best[0]
   const last = best[best.length - 1]
-  const start = first.start + Math.max(0, c.start - first.in)
-  const end = last.start + Math.min(last.out, c.end) - last.in
+  const start = srcToTl(first, Math.max(first.in, c.start))
+  const end = srcToTl(last, Math.min(last.out, c.end))
   const main = best.reduce((a, b) => (overlap(b) > overlap(a) ? b : a))
   return { start: r3(start), end: r3(Math.max(start, end)), itemId: main.id }
 }
@@ -99,12 +105,12 @@ export function orderedClips(p: Project): Array<{ clip: Clip; at: Placement | nu
 
 /** Время таймлайна -> время исходника для файла: берём кусок, под которым точка, иначе ближайший по краю. */
 export function sourceAt(p: Project, mediaId: string, t: number): number | null {
-  const items = p.items.filter((i) => i.kind === 'media' && i.mediaId === mediaId)
+  const items = mediaItems(p, mediaId)
   if (items.length === 0) return null
   const under = items.find((i) => t >= i.start && t <= itemEnd(i))
-  if (under) return r3(under.in + (t - under.start))
+  if (under) return r3(tlToSrc(under, t))
   const near = items.reduce((a, b) => (Math.abs(clampTo(t, b) - t) < Math.abs(clampTo(t, a) - t) ? b : a))
-  return r3(near.in + (clampTo(t, near) - near.start))
+  return r3(tlToSrc(near, clampTo(t, near)))
 }
 const clampTo = (t: number, i: Item): number => clamp(t, i.start, itemEnd(i))
 
@@ -218,7 +224,7 @@ export function cropProject(p: Project, a: number, b: number): Project {
     const s = Math.max(it.start, a)
     const e = Math.min(end, b)
     if (e - s < MIN_ITEM / 2) continue
-    items.push({ ...it, start: r3(s - a), in: r3(it.in + (s - it.start)), out: r3(it.in + (e - it.start)) })
+    items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)) })
   }
   return { ...p, items, markers: [], clips: [] }
 }

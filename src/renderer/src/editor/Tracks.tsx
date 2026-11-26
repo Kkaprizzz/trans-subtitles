@@ -27,6 +27,8 @@ import {
   patchMarker,
   projectDuration,
   snapPoints,
+  srcToTl,
+  tlToSrc,
   snapTo,
   splitItem,
   trackName,
@@ -236,9 +238,9 @@ function GainLine(p: {
 }): React.JSX.Element {
   const it = p.item
   const y = (v: number): number => GAIN_PAD + (1 - v) * (p.height - 2 * GAIN_PAD)
-  const x = (srcT: number): number => timeToX(it.start + (srcT - it.in), p.view) - timeToX(p.from, p.view)
-  const srcFrom = it.in + (p.from - it.start)
-  const srcTo = srcFrom + p.width / p.view.pps
+  const x = (srcT: number): number => timeToX(srcToTl(it, srcT), p.view) - timeToX(p.from, p.view)
+  const srcFrom = tlToSrc(it, p.from)
+  const srcTo = tlToSrc(it, p.from + p.width / p.view.pps)
   const inner = it.gain.filter((pt) => pt.t > srcFrom && pt.t < srcTo)
   const verts = [[0, y(gainAt(it.gain, it.volume, srcFrom))], ...inner.map((pt) => [x(pt.t), y(pt.v)]), [p.width, y(gainAt(it.gain, it.volume, srcTo))]]
   const pts = verts.map((v) => `${v[0].toFixed(1)},${v[1].toFixed(1)}`).join(' ')
@@ -510,17 +512,17 @@ function Tracks(p: Props): React.JSX.Element {
     setMenu(make(x, Math.max(0, xToTime(x, view)), y))
   }
   /** Пункты меню правой кнопки; run вызывается по щелчку, окно закрывается само. */
-  const menuEntries = (m: Menu): Array<{ label: string; run(): void }> => {
+  const menuEntries = (m: Menu): Array<{ label: string; key?: string; run(): void }> => {
     const pr = p.project
     const say = (error?: string): void => {
       if (error) p.onMessage(error)
     }
-    if (m.kind === 'lane') return [{ label: 'Добавить метку', run: () => addMarkerAt(m.trackId, m.t) }]
+    if (m.kind === 'lane') return [{ label: 'Добавить метку', key: 'M', run: () => addMarkerAt(m.trackId, m.t) }]
     const it = pr.items.find((i) => i.id === m.itemId)
     if (!it) return []
     if (m.kind === 'line') return [{ label: 'Добавить точку', run: () => p.onCommit(addGainPoint(pr, it.id, m.t).p) }]
     if (m.kind === 'point') return [{ label: 'Удалить точку', run: () => p.onCommit(deleteGainPoint(pr, it.id, m.idx)) }]
-    const out: Array<{ label: string; run(): void }> = []
+    const out: Array<{ label: string; key?: string; run(): void }> = []
     const media = mediaOf(pr, it.mediaId)
     const own = pr.tracks.find((t) => t.id === it.trackId)
     if (it.kind === 'media' && own?.kind === 'video' && media?.hasVideo && hasSound(pr, it)) {
@@ -543,18 +545,23 @@ function Tracks(p: Props): React.JSX.Element {
         }
       })
     }
-    out.push({
-      label: 'Разрезать здесь',
-      run: () => {
-        const r = splitItem(pr, it.id, m.t)
-        if (!r.id) say('Здесь не разрезать: слишком близко к краю куска или дорожка закреплена')
-        else p.onCommit(r.p)
-      }
-    })
+    // режет всегда по курсору воспроизведения (как клавиша S), поэтому пункт есть, только когда курсор внутри куска
+    if (p.time > it.start + 0.1 && p.time < itemEnd(it) - 0.1) {
+      out.push({
+        label: 'Разрезать',
+        key: 'S',
+        run: () => {
+          const r = splitItem(pr, it.id, p.time)
+          if (!r.id) say('Не разрезать: дорожка закреплена')
+          else p.onCommit(r.p)
+        }
+      })
+    }
     for (const side of ['left', 'right'] as const) {
       if (!canJoin(pr, it.id, side)) continue
       out.push({
         label: side === 'left' ? 'Соединить с левым' : 'Соединить с правым',
+        key: 'Ctrl+J',
         run: () => {
           const r = joinWithNeighbor(pr, it.id, side)
           if (r.error) say(r.error)
@@ -563,9 +570,9 @@ function Tracks(p: Props): React.JSX.Element {
       })
     }
     const ids = p.selected.includes(it.id) ? p.selected : [it.id]
-    out.push({ label: 'Удалить', run: () => p.onCommit(deleteItems(pr, ids, false)) })
-    out.push({ label: 'Удалить и закрыть дыру', run: () => p.onCommit(deleteItems(pr, ids, true)) })
-    out.push({ label: 'Добавить метку', run: () => addMarkerAt(it.trackId, m.t) })
+    out.push({ label: 'Удалить', key: 'Delete', run: () => p.onCommit(deleteItems(pr, ids, false)) })
+    out.push({ label: 'Удалить и закрыть дыру', key: 'Shift+Delete', run: () => p.onCommit(deleteItems(pr, ids, true)) })
+    out.push({ label: 'Добавить метку', key: 'M', run: () => addMarkerAt(it.trackId, m.t) })
     return out
   }
 
@@ -836,8 +843,8 @@ function Tracks(p: Props): React.JSX.Element {
           const picH = onVideoTrack ? PIC_H : row.h
           const cls = `tr-item ${isSubs ? 'subs' : isVideo ? 'video' : 'audio'}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
           const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : (m?.name ?? '—')
-          const srcFrom = it.in + (visFrom - it.start)
-          const srcTo = it.in + (visTo - it.start)
+          const srcFrom = tlToSrc(it, visFrom)
+          const srcTo = tlToSrc(it, visTo)
           const itemMenu = (e: React.MouseEvent): void => openMenu(e, (x, t, y) => ({ kind: 'item', x, y, itemId: it.id, t }), it)
           const gainHandlers = (top: number, h: number): React.ComponentProps<typeof GainLine> => ({
             item: it,
@@ -866,6 +873,7 @@ function Tracks(p: Props): React.JSX.Element {
                 {!isSubs && width > 36 && (
                   <span className="tr-label">
                     {label} <span className="mono">{itemDur(it).toFixed(1)} с</span>
+                    {it.speed !== 1 && <span className="mono tr-speed"> ×{it.speed}</span>}
                   </span>
                 )}
                 {!locked && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
@@ -947,7 +955,7 @@ function Tracks(p: Props): React.JSX.Element {
           />
         )}
         {menu && (
-          <div className="ctx" style={{ left: Math.min(menu.x, Math.max(0, w - 210)), top: Math.min(menu.y, Math.max(0, h - 32 * menuEntries(menu).length - 14)) }} onPointerDown={(e) => e.stopPropagation()} role="menu">
+          <div className="ctx" style={{ left: Math.min(menu.x, Math.max(0, w - 290)), top: Math.min(menu.y, Math.max(0, h - 32 * menuEntries(menu).length - 14)) }} onPointerDown={(e) => e.stopPropagation()} role="menu">
             {menuEntries(menu).map((en) => (
               <button
                 key={en.label}
@@ -957,7 +965,9 @@ function Tracks(p: Props): React.JSX.Element {
                   setMenu(null)
                 }}
               >
-                {en.label === 'Добавить метку' && <Svg d={I.flag} />} {en.label}
+                {en.label === 'Добавить метку' && <Svg d={I.flag} />}
+                <span className="ctx-label">{en.label}</span>
+                {en.key && <span className="ctx-key mono">{en.key}</span>}
               </button>
             ))}
           </div>

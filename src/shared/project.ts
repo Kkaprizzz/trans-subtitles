@@ -1,5 +1,6 @@
 /**
- * Модель проекта монтажки (формат v6). Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
+ * Модель проекта монтажки (формат v7).
+ * Скорость куска (speed, 0.25–4): на таймлайне он занимает (out − in) ÷ speed секунд; in/out — всегда секунды файла. Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
  *
  * Дорожки — массив сверху вниз: сначала видеодорожки (выше дорожка — выше слой в кадре), потом звуковые.
  * Все видеодорожки одинаковые: нет «основной» и нет авто-сдвига кусков. Кусок (Item) — отрезок in..out файла
@@ -61,6 +62,8 @@ export interface Item {
   /** Звук куска прикреплён к нему и звучит вместе с ним. Отделили — у видеокуска false, а звук лежит отдельным куском на звуковой дорожке. */
   audio: boolean
   /** громкость куска без точек, 0..1 (1 — как в файле); с точками линия громкости главнее */
+  /** скорость воспроизведения, 1 — как в файле; тон звука сохраняется */
+  speed: number
   volume: number
   /** линия громкости: точки во времени ИСХОДНИКА, между ними линейно */
   gain: GainPoint[]
@@ -115,7 +118,7 @@ export interface Canvas {
 }
 
 export interface Project {
-  version: 6
+  version: 7
   id: string
   name: string
   createdAt: string
@@ -149,14 +152,21 @@ const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
 let seq = 0
 export const uid = (p: string): string => `${p}${Date.now().toString(36)}${(seq++).toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`
 
-export const itemDur = (it: Item): number => it.out - it.in
-export const itemEnd = (it: Item): number => it.start + it.out - it.in
+export const MIN_SPEED = 0.25
+export const MAX_SPEED = 4
+/** Длина куска на таймлайне, с: отрезок файла ÷ скорость. */
+export const itemDur = (it: Item): number => (it.out - it.in) / it.speed
+export const itemEnd = (it: Item): number => it.start + itemDur(it)
+/** Время таймлайна -> секунды файла для куска. */
+export const tlToSrc = (it: Item, t: number): number => it.in + (t - it.start) * it.speed
+/** Секунды файла -> время таймлайна для куска. */
+export const srcToTl = (it: Item, s: number): number => it.start + (s - it.in) / it.speed
 
 const newTrack = (kind: TrackKind): Track => ({ id: uid('t'), kind, muted: false, hidden: false, locked: false })
 
 export function newProject(name: string, now = new Date().toISOString()): Project {
   return {
-    version: 6,
+    version: 7,
     id: uid('p'),
     name,
     createdAt: now,
@@ -271,13 +281,13 @@ export function finish(p0: Project): Project {
       dropped.add(it.id)
       continue
     }
-    if (it.mediaId !== v.mediaId || it.start !== v.start || it.in !== v.in || it.out !== v.out) stale.push(it)
+    if (it.mediaId !== v.mediaId || it.start !== v.start || it.in !== v.in || it.out !== v.out || it.speed !== v.speed) stale.push(it)
   }
   if (dropped.size === 0 && stale.length === 0) return p
   p = { ...p, items: p.items.filter((i) => !dropped.has(i.id)) }
   for (const it of stale) {
     const v = byId.get(it.link as string) as Item
-    const synced: Item = { ...it, mediaId: v.mediaId, start: v.start, in: v.in, out: v.out }
+    const synced: Item = { ...it, mediaId: v.mediaId, start: v.start, in: v.in, out: v.out, speed: v.speed }
     const end = itemEnd(synced)
     const rest = { ...p, items: p.items.filter((i) => i.id !== it.id) }
     const placed = fits(rest, it.trackId, synced.start, end) ? { p: rest, id: it.trackId } : placeFree(rest, 'video', synced.start, end, it.trackId)
@@ -308,7 +318,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, volume: 1, gain: [], link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -356,18 +366,18 @@ export function trimItem(p: Project, id: string, edge: 'start' | 'end', t: numbe
   const neighbors = itemsOn(p, it.trackId).filter((x) => x.id !== id)
   let next: Item
   if (edge === 'start') {
-    let lo = Math.max(0, it.start - it.in)
+    let lo = Math.max(0, it.start - it.in / it.speed)
     const prev = neighbors.filter((x) => itemEnd(x) <= it.start + 1e-6).pop()
     if (prev) lo = Math.max(lo, itemEnd(prev))
     const hi = itemEnd(it) - MIN_ITEM
     const nt = Math.min(hi, Math.max(lo, t))
-    next = { ...it, in: r3(it.in + (nt - it.start)), start: r3(nt) }
+    next = { ...it, in: r3(tlToSrc(it, nt)), start: r3(nt) }
   } else {
-    let hi = it.start + (dur - it.in)
+    let hi = it.start + (dur - it.in) / it.speed
     const nxt = neighbors.find((x) => x.start >= itemEnd(it) - 1e-6)
     if (nxt) hi = Math.min(hi, nxt.start)
     const nt = Math.min(hi, Math.max(it.start + MIN_ITEM, t))
-    next = { ...it, out: r3(it.in + (nt - it.start)) }
+    next = { ...it, out: r3(tlToSrc(it, nt)) }
   }
   return finish({ ...p, items: p.items.map((x) => (x.id === id ? next : x)) })
 }
@@ -377,7 +387,7 @@ export function splitItem(p: Project, id: string, t: number): { p: Project; id: 
   const it0 = p.items.find((i) => i.id === id)
   if (!it0 || lockedItem(p, it0) || t <= it0.start + MIN_ITEM || t >= itemEnd(it0) - MIN_ITEM) return { p, id: '' }
   const it = unlinked(it0)
-  const cut = r3(it.in + (t - it.start))
+  const cut = r3(tlToSrc(it, t))
   const g = splitGain(it.gain, it.volume, cut)
   const left: Item = { ...it, out: cut, gain: g.left }
   const right: Item = { ...it, id: uid('i'), start: r3(t), in: cut, gain: g.right }
@@ -453,7 +463,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, volume: 1, gain: [], link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -467,7 +477,7 @@ export function activeAt(p: Project, t: number): Item[] {
     .sort((a, b) => (order.get(b.trackId) ?? 0) - (order.get(a.trackId) ?? 0))
 }
 
-export const sourceTime = (it: Item, t: number): number => it.in + (t - it.start)
+export const sourceTime = tlToSrc
 
 // --- метки ---
 
@@ -527,8 +537,8 @@ function wordsOfItem(p: Project, it: Item): TlWord[] {
   ws.forEach((w, idx) => {
     const mid = (w.start + w.end) / 2
     if (mid < it.in || mid >= it.out) return
-    const s = Math.max(it.start, it.start + (w.start - it.in))
-    const e = Math.min(end, it.start + (w.end - it.in))
+    const s = Math.max(it.start, srcToTl(it, w.start))
+    const e = Math.min(end, srcToTl(it, w.end))
     if (e - s < 0.02) return
     out.push({ id: 0, text: w.text, start: r3(s), end: r3(e), mediaId: it.mediaId, itemId: it.id, trackId: it.trackId, idx })
   })
@@ -685,7 +695,7 @@ export function setTlWordTiming(p: Project, w: TlWord, patch: { start?: number; 
   const it = p.items.find((i) => i.id === w.itemId)
   const m = mediaOf(p, w.mediaId)
   if (!it || !m) return null
-  const toSrc = (t: number): number => it.in + (t - it.start)
+  const toSrc = (t: number): number => tlToSrc(it, t)
   const next = E.setTiming(
     p.words[w.mediaId] ?? [],
     w.idx,
@@ -773,7 +783,8 @@ function sanitizeClips(raw: unknown, media: MediaRef[]): Clip[] {
 export function sanitizeProject(raw: unknown): Project | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
-  if (r.version !== 3 && r.version !== 4 && r.version !== 5 && r.version !== 6) return null
+  const ver = typeof r.version === 'number' ? r.version : 0
+  if (ver < 3 || ver > 7) return null
   const media: MediaRef[] = Array.isArray(r.media)
     ? (r.media as Array<Record<string, unknown>>)
         .filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string' && num(m.duration, 0) > 0)
@@ -811,7 +822,7 @@ export function sanitizeProject(raw: unknown): Project | null {
         .map((i) => {
           const kind: ItemKind = i.kind === 'subs' ? 'subs' : 'media'
           // v3: у куска был флаг «показывать субтитры» — теперь это связанный кусок субтитров
-          if (r.version === 3 && i.subs === true) legacySubs.push(i.id as string)
+          if (ver === 3 && i.subs === true) legacySubs.push(i.id as string)
           const media = mediaOf1(i.mediaId as string)
           return {
             id: i.id as string,
@@ -823,6 +834,7 @@ export function sanitizeProject(raw: unknown): Project | null {
             out: num(i.out, 0),
             // до v6 звук всегда играл вместе с видео; у субтитров звука нет
             audio: kind === 'media' && !!media?.hasAudio && i.audio !== false,
+            speed: Math.min(MAX_SPEED, Math.max(MIN_SPEED, num(i.speed, 1))),
             volume: Math.min(1, Math.max(0, num(i.volume, 1))),
             gain: kind === 'media' ? cleanPoints(i.gain) : [],
             link: kind === 'subs' && typeof i.link === 'string' ? i.link : null
@@ -870,7 +882,7 @@ export function sanitizeProject(raw: unknown): Project | null {
       ? { w: even((r.canvas as Canvas).w), h: even((r.canvas as Canvas).h) }
       : null
   let p: Project = {
-    version: 6,
+    version: 7,
     id: str(r.id) || uid('p'),
     name: str(r.name, 'Проект').slice(0, 120) || 'Проект',
     createdAt: str(r.createdAt),
@@ -884,7 +896,7 @@ export function sanitizeProject(raw: unknown): Project | null {
     words,
     covered,
     // в v3/v4 рамок в этом виде не было (там лежали рамки старого режима в секундах таймлайна) — их не переносим
-    clips: r.version === 5 || r.version === 6 ? sanitizeClips(r.clips, media) : [],
+    clips: ver >= 5 ? sanitizeClips(r.clips, media) : [],
     style: r.style && typeof r.style === 'object' ? (r.style as SubtitleStyle) : null
   }
   if (legacySubs.length > 0) p = addSubtitles(p, legacySubs)

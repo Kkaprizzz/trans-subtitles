@@ -1230,7 +1230,7 @@ textarea {
 .ctx {
   position: absolute;
   z-index: 40;
-  min-width: 190px;
+  min-width: 270px;
   padding: 5px;
   background: var(--panel-2);
   border: 1px solid var(--line-2);
@@ -1543,4 +1543,61 @@ textarea {
   .tr-gain {
     transition: none;
   }
+}
+
+/* скорость куска */
+.tr-speed {
+  color: #ecd45b !important;
+}
+.speed-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.speed-row input {
+  width: 84px;
+  padding: 6px 9px;
+  color: var(--ink);
+  background: var(--panel-sunk);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+.speed-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.speed-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.speed-presets button {
+  min-width: 40px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--panel-2);
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.speed-presets button:hover {
+  color: var(--ink);
+}
+.speed-presets button.on {
+  color: var(--accent-ink);
+  background: var(--accent);
+}
+
+/* сочетание клавиш справа в пункте меню */
+.ctx-label {
+  flex: 1;
+  text-align: left;
+}
+.ctx-key {
+  margin-left: 18px;
+  font-size: 11px;
+  color: var(--ink-3);
 }

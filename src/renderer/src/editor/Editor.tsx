@@ -1053,7 +1053,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onStyleReset={() => commit({ ...projectRef.current, style: null }, 'style')}
         />
       ) : (
-        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
+        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} onMessage={(m) => p.onError(m)} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
       )}
 
       <section className="ed-timeline">

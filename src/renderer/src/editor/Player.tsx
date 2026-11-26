@@ -191,6 +191,8 @@ export default function Player(p: Props): React.JSX.Element {
         el.style.objectFit = framed && cv.mode === 'crop' ? 'cover' : 'contain'
         el.style.objectPosition = framed && cv.mode === 'crop' ? `${cv.offsetX * 100}% 50%` : '50% 50%'
       }
+      // скорость куска; тон сохраняется (preservesPitch по умолчанию включён)
+      if (el.playbackRate !== it.speed) el.playbackRate = it.speed
       el.muted = muted.has(it.trackId) || !it.audio
       // громкость куска по его линии в этот момент × общая громкость предпросмотра
       const own = gainAt(it.gain, it.volume, activeIds.has(it.id) ? sourceTime(it, t) : it.in)
@@ -205,7 +207,7 @@ export default function Player(p: Props): React.JSX.Element {
       const want = isActive ? sourceTime(it, t) : it.in
       if (!src) continue
       if (isActive && p.playing) {
-        if (Math.abs(el.currentTime - want) > DRIFT) el.currentTime = want
+        if (Math.abs(el.currentTime - want) > DRIFT * Math.max(1, it.speed)) el.currentTime = want
         if (el.paused) void el.play().catch(() => {})
       } else {
         if (!el.paused) el.pause()

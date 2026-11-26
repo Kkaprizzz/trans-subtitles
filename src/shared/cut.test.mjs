@@ -168,7 +168,7 @@ assert.equal(removeMedia(p, pod).clips.length, 0)
 // --- сохранение и чтение: v5 сохраняет рамки, битые выбрасывает, нахлёст обрезает
 const saved = JSON.parse(JSON.stringify(p))
 const back = sanitizeProject(saved)
-assert.equal(back.version, 6)
+assert.equal(back.version, 7)
 assert.deepEqual(back.clips.map((x) => [x.start, x.end]), [[10, 40]])
 const dirty = sanitizeProject({
   ...saved,

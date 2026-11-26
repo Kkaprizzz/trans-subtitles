@@ -9,7 +9,7 @@
  */
 import { gainExpr, gainPeak } from './audio.ts'
 import { framingChain } from './cut.ts'
-import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
+import { itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
 export type ExportFormat = 'h264' | 'prores422'
 export type ExportQuality = 'high' | 'medium' | 'small'
@@ -49,7 +49,34 @@ export interface ExportCommand {
 
 /** Громкость куска: число без точек, иначе выражение по времени куска (звук к этому месту уже обрезан и начинается с нуля). */
 const volumeFilter = (it: Project['items'][number]): string =>
-  it.gain.length === 0 ? `volume=${it.volume.toFixed(3)}` : `volume='${gainExpr(it.gain, it.volume, it.in, itemDur(it))}':eval=frame`
+  // громкость считается до смены темпа, поэтому время в выражении — секунды файла от начала отрезка
+  it.gain.length === 0 ? `volume=${it.volume.toFixed(3)}` : `volume='${gainExpr(it.gain, it.volume, it.in, it.out - it.in)}':eval=frame`
+
+/**
+ * Время кадров куска: при скорости 1 — как раньше (fps, затем сдвиг на старт); иначе сначала растягиваем время,
+ * потом fps повторяет кадры до нужной частоты (без интерполяции).
+ */
+const retime = (speed: number, start: string, fps: number): string =>
+  Math.abs(speed - 1) < 1e-6
+    ? `fps=${fps},setpts=PTS-STARTPTS+${start}/TB`
+    : `setpts=(PTS-STARTPTS)/${speed.toFixed(4)}+${start}/TB,fps=${fps}`
+
+/** Цепочка atempo для скорости (один фильтр держит 0.5–2; тон сохраняется). Пусто при скорости 1. */
+export function tempoFilter(speed: number): string {
+  if (Math.abs(speed - 1) < 1e-6) return ''
+  const parts: number[] = []
+  let s = speed
+  while (s < 0.5) {
+    parts.push(0.5)
+    s /= 0.5
+  }
+  while (s > 2) {
+    parts.push(2)
+    s /= 2
+  }
+  parts.push(s)
+  return parts.map((x) => `atempo=${x.toFixed(4)}`).join(',')
+}
 
 const f3 = (x: number): string => (Math.round(x * 1000) / 1000).toFixed(3)
 const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
@@ -85,7 +112,8 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
     const useA = m.hasAudio && it.audio && !muted.has(it.trackId) && gainPeak(it.gain, it.volume, it.in, it.out) > 0
     if (!useV && !useA) continue
     const k = inputCount++
-    inputs.push('-ss', f3(it.in), '-t', f3(itemDur(it)), '-i', m.path)
+    // вход режется по файлу (секунды исходника); скорость применяется фильтрами ниже
+    inputs.push('-ss', f3(it.in), '-t', f3(it.out - it.in), '-i', m.path)
     const s = f3(it.start)
     const e = f3(itemEnd(it))
     if (useV) {
@@ -96,11 +124,11 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const framed = o.framing && o.framing.mediaId === it.mediaId
           if (framed && o.framing) {
             graph.push(
-              `[${k}:v]fps=${o.fps},setpts=PTS-STARTPTS+${s}/TB[r${k}]`,
+              `[${k}:v]${retime(it.speed, s, o.fps)}[r${k}]`,
               ...framingChain(`r${k}`, `v${k}`, o.framing.mode, o.framing.offsetX, W, H, String(k))
             )
           } else {
-            graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,fps=${o.fps},setpts=PTS-STARTPTS+${s}/TB[v${k}]`)
+            graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${retime(it.speed, s, o.fps)}[v${k}]`)
           }
           graph.push(`[${last}][v${k}]overlay=x=(W-w)/2:y=(H-h)/2:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
           last = `o${k}`
@@ -109,7 +137,7 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
     }
     if (useA) {
       const ms = Math.round(it.start * 1000)
-      graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,${volumeFilter(it)},adelay=${ms}:all=1[a${k}]`)
+      graph.push(`[${k}:a]aresample=48000,aformat=channel_layouts=stereo,${volumeFilter(it)}${tempoFilter(it.speed) ? `,${tempoFilter(it.speed)}` : ''},adelay=${ms}:all=1[a${k}]`)
       aLabels.push(`a${k}`)
     }
   }
