@@ -3,9 +3,10 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKeys, propAt, setKey, type KeyProp } from './anim.ts'
+import { cleanKeys, evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKeys, propAt, setKey, type KeyProp } from './anim.ts'
 import { clampParam, EFFECTS, newEffect, type EffectType } from './effects.ts'
-import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
+import { DEFAULT_FRAME, fitSize, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
+import { faceAt, sameFace, type FaceTrack } from './face.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
 import { DEFAULT_SHAPE_LEN, newShape, patchShapeValues, type Shape, type ShapeKind } from './shape.ts'
 import { addTrackOf, finish, fits, isLayer, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, NEW_TRACK, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
@@ -37,7 +38,7 @@ export function detachAudio(p: Project, id: string): { p: Project; id: string; e
   if (locked(p, it)) return { p, id: '', error: 'Дорожка закреплена: открепи её' }
   const placed = placeFree(p, 'audio', it.start, itemEnd(it))
   // у звукового куска картинки нет: эффекты, кадр и ключи остаются у видео
-  const sound: Item = { ...it, id: uid('i'), trackId: placed.id, audio: true, link: null, effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys() }
+  const sound: Item = { ...it, id: uid('i'), trackId: placed.id, audio: true, link: null, effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), face: null }
   const video: Item = { ...it, audio: false, volume: 1, gain: [] }
   return { p: finish({ ...placed.p, items: [...placed.p.items.map((x) => (x.id === id ? video : x)), sound] }), id: sound.id }
 }
@@ -79,6 +80,7 @@ export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (Math.abs(a.speed - b.speed) > 1e-6) return 'У кусков разная скорость'
   if (joinEffects(a.effects, itemDur(a), b.effects, itemDur(b)) === null) return 'У кусков разные эффекты или анимации'
   if (!sameFrame(a.frame, b.frame)) return 'У кусков разный кадр (масштаб, положение, кроп или прозрачность)'
+  if (!sameFace(a.face, b.face)) return 'У кусков разный трек лица'
   if (keysJoinGap(partOf(a), partOf(b))) return 'У кусков разные ключевые кадры на стыке'
   return null
 }
@@ -315,6 +317,7 @@ export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FR
     keys: noKeys(),
     plate: null,
     shape: null,
+    face: null,
     link: null
   }
   return { p: finish({ ...cur, items: [...cur.items, fz] }), id: fz.id }
@@ -565,6 +568,7 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
     keys: noKeys(),
     plate: newPlate(styleId, text),
     shape: null,
+    face: null,
     link: null
   }
   return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }
@@ -573,6 +577,41 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
 /** Меняет параметры надписи (числа зажимаются в пределы). */
 export function patchPlate(p: Project, id: string, patch: Partial<Plate>): Project {
   return { ...p, items: p.items.map((i) => (i.id === id && i.kind === 'text' && i.plate && !locked(p, i) ? { ...i, plate: patchPlateValues(i.plate, patch) } : i)) }
+}
+
+// --- трек лица ---
+
+/**
+ * Записывает трек лица на кусок видео. Если кадр проекта уже картинки (вертикальный проект, видео шире), масштаб ставится
+ * «заполнить кадр», а по треку строятся прореженные плавные ключи X (их можно править): лицо остаётся в центре кадра. Там, где
+ * картинка и так во весь кадр (16:9), ключей нет: трек нужен кропу клипа «Нарезки». keyed — построены ли ключи.
+ */
+export function applyFaceTrack(p: Project, id: string, track: FaceTrack, canvas: { w: number; h: number } | null): { p: Project; keyed: boolean } {
+  const it = find(p, id)
+  const m = it ? mediaOf(p, it.mediaId) : undefined
+  if (!it || it.kind !== 'media' || !m?.hasVideo || !m.width || !m.height || track.length === 0) return { p, keyed: false }
+  const set = (item: Item): Project => ({ ...p, items: p.items.map((i) => (i.id === id ? item : i)) })
+  const narrower = !!canvas && canvas.w / canvas.h < m.width / m.height - 0.02
+  if (!canvas || !narrower) return { p: set({ ...it, face: track }), keyed: false }
+  const fit = fitSize(m.width, m.height, canvas.w, canvas.h)
+  const scale = Math.min(400, Math.max(it.frame.scale, Math.max(canvas.w / fit.w, canvas.h / fit.h) * 100))
+  const picW = fit.w * (scale / 100)
+  const maxShift = Math.max(0, (picW - canvas.w) / 2)
+  const eps = 1e-3
+  const srcTimes = [it.in, ...track.map((q) => q.t).filter((t) => t > it.in + eps && t < it.out - eps), it.out]
+  const keys = srcTimes.map((t, i) => {
+    const cx = faceAt(track, t)
+    const face = it.frame.flipH ? 1 - cx : cx
+    const shift = Math.min(maxShift, Math.max(-maxShift, -(face - 0.5) * picW))
+    return { t: Math.round(((t - it.in) / it.speed) * 1000) / 1000, v: (shift / canvas.w) * 100, ease: i < srcTimes.length - 1 }
+  })
+  const x = cleanKeys({ x: keys }).x
+  return { p: set({ ...it, face: track, frame: patchFrameValues(it.frame, { scale }), keys: { ...it.keys, x } }), keyed: x.length > 0 }
+}
+
+/** Убирает трек лица (ключи X, построенные по нему, остаются: они обычные и правятся руками). */
+export function clearFace(p: Project, id: string): Project {
+  return { ...p, items: p.items.map((i) => (i.id === id && i.face ? { ...i, face: null } : i)) }
 }
 
 // --- фигуры ---
@@ -602,6 +641,7 @@ export function insertShape(p: Project, at: number, kind: ShapeKind, len = DEFAU
     keys: noKeys(),
     plate: null,
     shape: newShape(kind, aspect),
+    face: null,
     link: null
   }
   return { p: finish({ ...placed.p, items: [...placed.p.items, it] }), id: it.id }

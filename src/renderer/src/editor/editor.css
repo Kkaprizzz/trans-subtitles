@@ -2384,3 +2384,77 @@ textarea {
 .fxr.off .fx-eye {
   color: var(--ink-3);
 }
+
+/* окно «Следить за лицом» */
+.face-modal {
+  width: 540px;
+}
+.face-modal .modal-body {
+  gap: 14px;
+  padding: 4px 20px 20px;
+}
+.fd-hint {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.fd-meta {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.face-modal .modal-actions {
+  margin-top: 2px;
+}
+.face-modal .hint.warn {
+  padding: 8px 10px;
+  background: rgba(240, 106, 95, 0.12);
+  border-radius: var(--radius);
+}
+.fd-frame {
+  position: relative;
+  width: 100%;
+  max-height: 46vh;
+  overflow: hidden;
+  background: var(--stage);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+}
+.fd-frame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.fd-box {
+  position: absolute;
+  padding: 0;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.fd-box:hover {
+  border-color: var(--accent);
+}
+.fd-box.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.insp-link.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0;
+  background: none;
+}
+
+/* блоки кнопок в инспекторе: просто ряд кнопок, без тёмной плашки */
+.insp-body .insp-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 0;
+  background: none;
+}

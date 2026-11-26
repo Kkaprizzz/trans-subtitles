@@ -7,7 +7,7 @@ import { FONTS, fontById } from '../../../shared/fonts'
 import { FRAME_LIMITS, isDefaultFrame, type FrameKey } from '../../../shared/frame'
 import { MAX_PLATE_TEXT, PLATE_LIMITS, plateLabel, type Plate } from '../../../shared/plate'
 import { SHAPE_LIMITS, shapeLabel } from '../../../shared/shape'
-import { canHaveEffects, clampSpeed, disableKeys, enableKeys, frameValueAt, hasFrameCrop, patchEffect, patchFrame, patchPlate, patchShape, removeEffect, resetFrame, setFreezeLength, setPropAt, setSpeed, SPEED_PRESETS, toggleFlip } from '../../../shared/mix'
+import { canHaveEffects, clampSpeed, clearFace, disableKeys, enableKeys, frameValueAt, hasFrameCrop, patchEffect, patchFrame, patchPlate, patchShape, removeEffect, resetFrame, setFreezeLength, setPropAt, setSpeed, SPEED_PRESETS, toggleFlip } from '../../../shared/mix'
 import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, trimItem, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
@@ -26,6 +26,8 @@ interface Props {
   /** выбранная рамка клипа (тогда показываем её свойства) */
   /** сообщение пользователю (почему не вышло) */
   onMessage(msg: string): void
+  /** открыть окно «Следить за лицом» для куска */
+  onFace(itemId: string): void
   clip: Clip | null
   onFocusClip(id: string): void
   onClipGone(): void
@@ -473,7 +475,7 @@ function useTab(group: string, ids: string[]): [string, (t: string) => void] {
 const isKeyProp = (k: FrameKey): k is KeyProp => (KEY_PROPS as string[]).includes(k)
 
 /** Поля «Кадра», общие для всех кусков с картинкой: масштаб, прозрачность, положение или сдвиг (с ромбиками), зеркало, сброс. cropToo — ещё и кроп. */
-function FrameTab(p: { project: Project; item: Item; time: number; getTime(): number; shift: boolean; crop: boolean; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+function FrameTab(p: { project: Project; item: Item; time: number; getTime(): number; shift: boolean; crop: boolean; onFace?(itemId: string): void; onCommit(next: Project, key?: string): void }): React.JSX.Element {
   const f = p.item.frame
   const id = p.item.id
   const toggle = (k: KeyProp): void => {
@@ -528,6 +530,22 @@ function FrameTab(p: { project: Project; item: Item; time: number; getTime(): nu
             {fld('ct', 'Сверху')}
             {fld('cb', 'Снизу')}
           </div>
+        </>
+      )}
+      {p.onFace && (
+        <>
+          <Sub>Лицо</Sub>
+          <div className="insp-link row">
+            <button className="btn small" onClick={() => p.onFace?.(id)} title="Найти лицо на кадре, выбрать щелчком и вести кадр за ним">
+              {p.item.face ? 'Пересчитать' : 'Следить за лицом'}
+            </button>
+            {p.item.face && (
+              <button className="btn small" onClick={() => p.onCommit(clearFace(p.project, id))} title="Убрать трек лица (ключи X останутся)">
+                Убрать трек
+              </button>
+            )}
+          </div>
+          {p.item.face && <span className="dim fx-none">Лицо отслежено · {p.item.face.length} точек</span>}
         </>
       )}
       <div className="insp-link">
@@ -711,7 +729,7 @@ function ShapePanel(p: { project: Project; item: Item; time: number; getTime(): 
 }
 
 /** Видео, баннер, стоп-кадр: вкладки «Кусок», «Кадр», «Анимация», «Эффекты». */
-function ItemPanel(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element | null {
+function ItemPanel(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void; onMessage(msg: string): void; onFace(itemId: string): void }): React.JSX.Element | null {
   const pr = p.project
   const one = p.item
   const m = mediaOf(pr, one.mediaId)
@@ -751,7 +769,9 @@ function ItemPanel(p: { project: Project; item: Item; time: number; getTime(): n
           )}
         </>
       )}
-      {tab === 'frame' && hasFrameCrop(pr, one) && <FrameTab project={pr} item={one} time={p.time} getTime={p.getTime} shift={false} crop onCommit={p.onCommit} />}
+      {tab === 'frame' && hasFrameCrop(pr, one) && (
+        <FrameTab project={pr} item={one} time={p.time} getTime={p.getTime} shift={false} crop onFace={one.kind === 'media' && !!m.hasVideo ? p.onFace : undefined} onCommit={p.onCommit} />
+      )}
       {tab === 'anim' && <EffectRows project={pr} item={one} anim onCommit={p.onCommit} />}
       {tab === 'fx' && <EffectRows project={pr} item={one} anim={false} onCommit={p.onCommit} />}
     </Shell>
@@ -766,7 +786,7 @@ function Inspector(p: Props): React.JSX.Element {
   if (one && one.kind === 'shape') return <ShapePanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />
   if (one && one.kind === 'text') return <TextPanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />
 
-  if (one && m) return <ItemPanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} onMessage={p.onMessage} />
+  if (one && m) return <ItemPanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} onMessage={p.onMessage} onFace={p.onFace} />
 
   const cv = pr.canvas
   const cvId = cv ? `${cv.w}x${cv.h}` : ''

@@ -1,5 +1,6 @@
 /** Общие типы для main / preload / renderer. */
 import type { ClipCandidate } from './clips'
+import type { FaceBox, FaceScan } from './face'
 import type { Canvas, Project } from './project'
 import type { SubtitleStyle } from './timeline'
 
@@ -34,6 +35,23 @@ export interface BannerEntry extends MediaInfo {
   missing: boolean
 }
 
+/** Модель поиска лиц (YuNet): скачана ли и сколько весит. */
+export interface FaceStatus {
+  installed: boolean
+  sizeMB: number
+}
+
+/** Кадр для выбора лица: картинка (data URL), размеры исходника, найденные рамки (доли кадра) и момент кадра. */
+export interface FacePreview {
+  image: string
+  width: number
+  height: number
+  boxes: FaceBox[]
+  t: number
+}
+
+export type { FaceScan }
+
 export type ModelId = 'gigaam-v3' | 'whisper-small' | 'whisper-turbo'
 
 export interface ModelStatus {
@@ -50,7 +68,7 @@ export interface ModelStatus {
 }
 
 export interface ProgressEvent {
-  stage: 'audio' | 'asr' | 'download' | 'render' | 'ai'
+  stage: 'audio' | 'asr' | 'download' | 'render' | 'ai' | 'face'
   /** 0..1 */
   value: number
   label: string
@@ -258,6 +276,13 @@ export interface Api {
   /** alpha — миниатюра PNG с прозрачностью (для баннеров), иначе JPEG */
   thumbnail(mediaPath: string, duration: number, alpha?: boolean): Promise<string>
   /** библиотека баннеров: список, добавить (диалог / по путям уже открытых в приложении файлов), убрать, переименовать */
+  /** поиск лиц: модель, кадр с рамками, трек по отрезку (прогресс — onProgress, stage 'face'), отмена */
+  faceStatus(): Promise<FaceStatus>
+  downloadFaceModel(): Promise<void>
+  facePreview(mediaPath: string, t: number): Promise<FacePreview>
+  /** speaker — ещё и движение губ и речь (режим «говорящий») */
+  faceTrack(mediaPath: string, from: number, to: number, speaker: boolean): Promise<FaceScan>
+  cancelFace(): Promise<void>
   listBanners(): Promise<BannerEntry[]>
   addBanners(): Promise<BannerEntry[]>
   addBannerFiles(paths: string[]): Promise<BannerEntry[]>

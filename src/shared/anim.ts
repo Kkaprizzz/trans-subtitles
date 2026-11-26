@@ -26,7 +26,7 @@ export type Keys = Record<KeyProp, Key[]>
 
 /** Пределы и значение по умолчанию: совпадают с полями «Кадра». */
 export const KEY_INFO: Record<KeyProp, { title: string; min: number; max: number; def: number; unit: string }> = {
-  x: { title: 'Положение X', min: -100, max: 100, def: 0, unit: '%' },
+  x: { title: 'Положение X', min: -150, max: 150, def: 0, unit: '%' },
   y: { title: 'Положение Y', min: -100, max: 100, def: 0, unit: '%' },
   scale: { title: 'Масштаб', min: 10, max: 400, def: 100, unit: '%' },
   opacity: { title: 'Прозрачность', min: 0, max: 100, def: 100, unit: '%' }
@@ -72,11 +72,16 @@ export function cleanKeys(raw: unknown): Keys {
   return out
 }
 
-/** Плавность: smoothstep (ease in-out). */
+/**
+ * Кривые движения. Плавное движение (ключи «плавно», кадр трекинга) — ease-in-out кубическая: мягкий старт и мягкий финиш.
+ * Входы анимаций (появление, зум, выезд) — ease-out: быстро стартуют и мягко садятся; выходы — ease-in: плавно разгоняются.
+ */
 export const ease = (u: number): number => {
   const x = clamp(u, 0, 1)
-  return x * x * (3 - 2 * x)
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2
 }
+export const easeOut = (u: number): number => 1 - Math.pow(1 - clamp(u, 0, 1), 3)
+export const easeIn = (u: number): number => Math.pow(clamp(u, 0, 1), 3)
 
 /** Значение по ключам в момент t (от начала куска). Без ключей — base. */
 export function evalKeys(keys: Key[], base: number, t: number): number {
@@ -158,22 +163,23 @@ export function animAt(src: AnimSource, len: number, t: number): Anim {
   let sc = evalKeys(src.keys.scale, f.scale, t) / 100
   let op = evalKeys(src.keys.opacity, f.opacity, t) / 100
   const a = animSet(src.effects)
-  if (a.fadeIn) op *= ease((t + a.fadeIn.sk) / a.fadeIn.d)
-  if (a.fadeOut) op *= ease((len - t + a.fadeOut.sk) / a.fadeOut.d)
+  if (a.fadeIn) op *= easeOut((t + a.fadeIn.sk) / a.fadeIn.d)
+  // исчезновение: прозрачность падает по ease-in от прогресса выхода (1 − оставшаяся доля)
+  if (a.fadeOut) op *= 1 - easeIn(1 - clamp((len - t + a.fadeOut.sk) / a.fadeOut.d, 0, 1))
   if (a.zoom) {
-    const u = ease((t + a.zoom.sk) / a.zoom.d)
+    const u = easeOut((t + a.zoom.sk) / a.zoom.d)
     sc *= 1 + a.zoom.a * (a.zoom.dir === 0 ? u : 1 - u)
   }
   if (a.pop) sc *= 1 + a.pop.a * Math.sin(Math.PI * clamp((t + a.pop.sk) / a.pop.d, 0, 1))
   if (a.slideIn) {
-    const off = 100 * (1 - ease((t + a.slideIn.sk) / a.slideIn.d))
+    const off = 100 * (1 - easeOut((t + a.slideIn.sk) / a.slideIn.d))
     if (a.slideIn.side === 0) x -= off
     else if (a.slideIn.side === 1) x += off
     else if (a.slideIn.side === 2) y -= off
     else y += off
   }
   if (a.slideOut) {
-    const off = 100 * ease(1 - (len - t + a.slideOut.sk) / a.slideOut.d)
+    const off = 100 * easeIn(1 - (len - t + a.slideOut.sk) / a.slideOut.d)
     if (a.slideOut.side === 0) x -= off
     else if (a.slideOut.side === 1) x += off
     else if (a.slideOut.side === 2) y -= off
@@ -257,7 +263,8 @@ export function setKey(keys: Key[], prop: KeyProp, t: number, v: number, len: nu
   const near = keys.findIndex((k) => Math.abs(k.t - tt) <= KEY_GAP)
   if (near >= 0) return { keys: keys.map((k, i) => (i === near ? { ...k, v: vv, ease: easeOn ?? k.ease } : k)), index: near }
   if (keys.length >= MAX_KEYS) return { keys, index: -1 }
-  const next = [...keys, { t: tt, v: vv, ease: easeOn ?? false }].sort((a, b) => a.t - b.t)
+  // новый ключ по умолчанию «плавно»: линейные отрезки выглядят механически
+  const next = [...keys, { t: tt, v: vv, ease: easeOn ?? true }].sort((a, b) => a.t - b.t)
   return { keys: next, index: next.findIndex((k) => k.t === tt) }
 }
 
@@ -331,8 +338,10 @@ export function mergeKeys(a: KeyedPart, b: KeyedPart): Keys {
     if (j > 0 && j < list.length - 1) {
       const prev = list[j - 1]
       const next = list[j + 1]
-      const line = prev.v + ((next.v - prev.v) * (list[j].t - prev.t)) / (next.t - prev.t)
-      if (!prev.ease && !list[j].ease && Math.abs(line - list[j].v) < 0.02) list.splice(j, 1)
+      // ключ лежит на кривой между соседями (с той же плавностью, что у предыдущего отрезка) — он не нужен
+      const u = (list[j].t - prev.t) / (next.t - prev.t)
+      const onCurve = prev.v + (next.v - prev.v) * (prev.ease ? ease(u) : u)
+      if (prev.ease === list[j].ease && Math.abs(onCurve - list[j].v) < 0.02) list.splice(j, 1)
     }
     out[p] = list.slice(0, MAX_KEYS)
   }
@@ -363,11 +372,14 @@ const f6 = (x: number): string => {
   const s = (Math.round(x * 1e6) / 1e6).toString()
   return x < 0 ? `(${s})` : s
 }
-const E = (u: string): string => `((${u})*(${u})*(3-2*(${u})))`
+/** Те же кривые, что ease / easeOut / easeIn, выражениями ffmpeg (u — строка, уже зажатая в 0..1 или внутри отрезка). */
+const E = (u: string): string => `(if(lt(${u},0.5),4*(${u})*(${u})*(${u}),1-pow(2-2*(${u}),3)/2))`
+const EOUT = (u: string): string => `(1-pow(1-(${u}),3))`
+const EIN = (u: string): string => `pow(${u},3)`
 const CL01 = (x: string): string => `clip(${x},0,1)`
 
 /** Линия по ключам как выражение от rel (время от начала куска, строкой). */
-function keysExpr(keys: Key[], rel: string): string {
+export function keysExpr(keys: Key[], rel: string): string {
   const n = keys.length
   let e = f6(keys[n - 1].v)
   for (let i = n - 2; i >= 0; i--) {
@@ -402,11 +414,11 @@ export function animExpr(src: AnimSource, len: number, start: number, tv: 't' | 
   const shift = { x: [] as string[], y: [] as string[] }
   if (a.slideIn) {
     const { axis, sign } = dirSign(a.slideIn.side)
-    shift[axis].push(`${sign}100*(1-${E(CL01(`(${rel}+${f6(a.slideIn.sk)})/${f6(a.slideIn.d)}`))})`)
+    shift[axis].push(`${sign}100*(1-${EOUT(CL01(`(${rel}+${f6(a.slideIn.sk)})/${f6(a.slideIn.d)}`))})`)
   }
   if (a.slideOut) {
     const { axis, sign } = dirSign(a.slideOut.side)
-    shift[axis].push(`${sign}100*${E(CL01(`1-(${L}-${rel}+${f6(a.slideOut.sk)})/${f6(a.slideOut.d)}`))}`)
+    shift[axis].push(`${sign}100*${EIN(CL01(`1-(${L}-${rel}+${f6(a.slideOut.sk)})/${f6(a.slideOut.d)}`))}`)
   }
   const pos = (p: 'x' | 'y'): Expr => {
     const k = keyed(p)
@@ -417,7 +429,7 @@ export function animExpr(src: AnimSource, len: number, start: number, tv: 't' | 
   // масштаб: база × зум × поп
   const mul: string[] = []
   if (a.zoom) {
-    const u = E(CL01(`(${rel}+${f6(a.zoom.sk)})/${f6(a.zoom.d)}`))
+    const u = EOUT(CL01(`(${rel}+${f6(a.zoom.sk)})/${f6(a.zoom.d)}`))
     mul.push(`(1+${f6(a.zoom.a)}*${a.zoom.dir === 0 ? u : `(1-${u})`})`)
   }
   if (a.pop) mul.push(`(1+${f6(a.pop.a)}*sin(PI*${CL01(`(${rel}+${f6(a.pop.sk)})/${f6(a.pop.d)}`)}))`)
@@ -426,8 +438,8 @@ export function animExpr(src: AnimSource, len: number, start: number, tv: 't' | 
 
   // прозрачность: база × появление × исчезновение
   const om: string[] = []
-  if (a.fadeIn) om.push(E(CL01(`(${rel}+${f6(a.fadeIn.sk)})/${f6(a.fadeIn.d)}`)))
-  if (a.fadeOut) om.push(E(CL01(`(${L}-${rel}+${f6(a.fadeOut.sk)})/${f6(a.fadeOut.d)}`)))
+  if (a.fadeIn) om.push(EOUT(CL01(`(${rel}+${f6(a.fadeIn.sk)})/${f6(a.fadeIn.d)}`)))
+  if (a.fadeOut) om.push(`(1-${EIN(`(1-${CL01(`(${L}-${rel}+${f6(a.fadeOut.sk)})/${f6(a.fadeOut.d)}`)})`)})`)
   const ko = keyed('opacity')
   const opacity: Expr = !ko && om.length === 0 ? { c: clamp(f.opacity / 100, 0, 1) } : { e: `clip((${ko ?? f6(f.opacity)})/100${om.map((m) => `*${m}`).join('')},0,1)` }
 

@@ -22,6 +22,7 @@ import { cleanEffects, isAnimType, type Effect } from './effects.ts'
 import { FONTS } from './fonts.ts'
 import { cleanFrame, DEFAULT_FRAME, type Frame } from './frame.ts'
 import { cleanPlate, type Plate } from './plate.ts'
+import { cleanFace, type FaceTrack } from './face.ts'
 import { cleanShape, type Shape } from './shape.ts'
 import * as E from './edit.ts'
 import type { SubtitleStyle } from './timeline.ts'
@@ -91,6 +92,8 @@ export interface Item {
   plate: Plate | null
   /** для kind 'shape': параметры фигуры; у остальных null */
   shape: Shape | null
+  /** трек лица (время исходника): ключи X в вертикальном проекте и кроп клипа «Нарезки» едут за ним; null — не отслежено */
+  face: FaceTrack | null
   /** для kind 'subs': id видеокуска, за которым едут субтитры; null — живут сами */
   link: string | null
 }
@@ -362,7 +365,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, shape: null, link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, shape: null, face: null, link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -552,7 +555,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, shape: null, link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, shape: null, face: null, link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -930,6 +933,7 @@ export function sanitizeProject(raw: unknown): Project | null {
             keys: kind === 'subs' ? noKeys() : cleanKeys(i.keys),
             plate: kind === 'text' ? cleanPlate(i.plate, FONTS.map((f) => f.id)) : null,
             shape: kind === 'shape' ? cleanShape(i.shape) : null,
+            face: kind === 'media' ? cleanFace(i.face) : null,
             speed: kind === 'media' ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, num(i.speed, 1))) : 1,
             volume: Math.min(1, Math.max(0, num(i.volume, 1))),
             gain: kind === 'media' ? cleanPoints(i.gain) : [],

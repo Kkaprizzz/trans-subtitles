@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { animAt, animExpr, animSet, cleanKeys, clampKeys, evalKeys, hasKeys, isAnimated, joinEffects, keysJoinGap, mergeKeys, moveKey, noKeys, setKey, shiftKeys, sliceEffects, splitKeys, ease } from './anim.ts'
+import { animAt, animExpr, animSet, cleanKeys, clampKeys, evalKeys, hasKeys, isAnimated, joinEffects, keysJoinGap, mergeKeys, moveKey, noKeys, setKey, shiftKeys, sliceEffects, splitKeys, ease, easeIn, easeOut } from './anim.ts'
 import { DEFAULT_FRAME } from './frame.ts'
 import { newEffect, cleanEffects } from './effects.ts'
 import { insertShape, patchShape, toggleFlip, canHaveEffects, hasFrameCrop } from './mix.ts'
@@ -25,7 +25,7 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   assert.ok(evalKeys(ks, 50, 5.5) > 100 - 25, 'в начале плавного отрезка движение медленнее линейного')
   near(evalKeys(ks, 50, 99), 0, 'после последнего держится последний')
   near(evalKeys([], 42, 3), 42, 'без ключей — значение из «Кадра»')
-  assert.deepEqual(cleanKeys({ x: [{ t: 2, v: 999, ease: true }, { t: 1, v: -999 }, { t: 'a', v: 1 }, { t: 1.0004, v: 5 }], scale: 'x' }).x, [{ t: 1, v: -100, ease: false }, { t: 2, v: 100, ease: true }], 'мусор выброшен, значения зажаты, дубли по времени склеены')
+  assert.deepEqual(cleanKeys({ x: [{ t: 2, v: 999, ease: true }, { t: 1, v: -999 }, { t: 'a', v: 1 }, { t: 1.0004, v: 5 }], scale: 'x' }).x, [{ t: 1, v: -150, ease: false }, { t: 2, v: 150, ease: true }], 'мусор выброшен, значения зажаты, дубли по времени склеены')
   assert.deepEqual(cleanKeys(null), noKeys())
 }
 
@@ -34,13 +34,14 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   const len = 10
   const a = (effects, t, extra = {}) => animAt(src({ effects, ...extra }), len, t)
   near(a([fx('fadeIn', { dur: 2 })], 0).opacity, 0, 'появление: в начале прозрачно')
-  near(a([fx('fadeIn', { dur: 2 })], 1).opacity, 0.5, 'появление: середина')
+  near(a([fx('fadeIn', { dur: 2 })], 1).opacity, easeOut(0.5), 'появление: середина (ease-out, быстро стартует)')
+  assert.ok(a([fx('fadeIn', { dur: 2 })], 0.4).opacity > 0.4 / 2, 'ease-out: в начале растёт быстрее линейного')
   near(a([fx('fadeIn', { dur: 2 })], 5).opacity, 1, 'появление: потом полностью видно')
-  near(a([fx('fadeOut', { dur: 2 })], 9).opacity, 0.5, 'исчезновение: середина')
+  near(a([fx('fadeOut', { dur: 2 })], 9).opacity, 1 - easeIn(0.5), 'исчезновение: середина (ease-in)')
   near(a([fx('fadeOut', { dur: 2 })], 10).opacity, 0, 'исчезновение: в конце прозрачно')
   near(a([fx('fadeIn', { dur: 2 }, { on: false })], 0).opacity, 1, 'выключенная анимация не действует')
   near(a([fx('zoom', { dir: 0, dur: 2, amount: 20 })], 0).scale, 1, 'приближение: старт 100%')
-  near(a([fx('zoom', { dir: 0, dur: 2, amount: 20 })], 1).scale, 1.1, 'приближение: середина')
+  near(a([fx('zoom', { dir: 0, dur: 2, amount: 20 })], 1).scale, 1 + 0.2 * easeOut(0.5), 'приближение: середина (ease-out)')
   near(a([fx('zoom', { dir: 0, dur: 2, amount: 20 })], 8).scale, 1.2, 'приближение держится на 120%')
   near(a([fx('zoom', { dir: 1, dur: 2, amount: 20 })], 0).scale, 1.2, 'отдаление: старт 120%')
   near(a([fx('zoom', { dir: 1, dur: 2, amount: 20 })], 5).scale, 1, 'отдаление: потом 100%')
@@ -54,13 +55,13 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   near(a([fx('slideIn', { side: 0, dur: 1 })], 1).x, 0, 'выезд закончился')
   near(a([fx('slideOut', { side: 1, dur: 1 })], 10).x, 100, 'уход вправо: в конце за краем')
   near(a([fx('slideOut', { side: 1, dur: 1 })], 9).x, 0, 'уход: до начала окна на месте')
-  near(a([fx('slideOut', { side: 0, dur: 1 })], 9.5).x, -50, 'уход влево: середина')
+  near(a([fx('slideOut', { side: 0, dur: 1 })], 9.5).x, -100 * easeIn(0.5), 'уход влево: середина (ease-in)')
   // анимации поверх ключей и «Кадра»: масштаб умножается, сдвиг складывается, прозрачность умножается
   const fr = { ...DEFAULT_FRAME, scale: 200, x: 10, opacity: 50 }
   const r = animAt(src({ frame: fr, effects: [fx('zoom', { dir: 0, dur: 1, amount: 50 }), fx('slideIn', { side: 0, dur: 1 }), fx('fadeIn', { dur: 1 })] }), len, 0.5)
-  near(r.scale, 2 * 1.25, 'масштаб: база × зум')
-  near(r.x, 10 - 50, 'сдвиг: база + выезд')
-  near(r.opacity, 0.5 * 0.5, 'прозрачность: база × появление')
+  near(r.scale, 2 * (1 + 0.5 * easeOut(0.5)), 'масштаб: база × зум')
+  near(r.x, 10 - 100 * (1 - easeOut(0.5)), 'сдвиг: база + выезд')
+  near(r.opacity, 0.5 * easeOut(0.5), 'прозрачность: база × появление')
   const k = noKeys()
   k.scale = [{ t: 0, v: 100, ease: false }, { t: 10, v: 300, ease: false }]
   near(animAt(src({ keys: k, effects: [fx('zoom', { dir: 0, dur: 1, amount: 100 })] }), len, 5).scale, 2 * 2, 'ключи × зум')
@@ -76,7 +77,7 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
 // --- выражения ffmpeg совпадают с animAt (одна математика для превью и экспорта)
 {
   const IF = (c, a, b) => (c ? a : b)
-  const ev = (expr, t) => new Function('t', 'T', 'IF', 'lt', 'clip', 'sin', 'PI', `return ${expr.replace(/\bif\(/g, 'IF(')}`)(t, t, IF, (a, b) => (a < b ? 1 : 0), (x, a, b) => Math.min(b, Math.max(a, x)), Math.sin, Math.PI)
+  const ev = (expr, t) => new Function('t', 'T', 'IF', 'lt', 'clip', 'sin', 'PI', 'pow', `return ${expr.replace(/\bif\(/g, 'IF(')}`)(t, t, IF, (a, b) => (a < b ? 1 : 0), (x, a, b) => Math.min(b, Math.max(a, x)), Math.sin, Math.PI, Math.pow)
   const val = (e, t) => (e.e === undefined ? e.c : ev(e.e, t))
   const keys = noKeys()
   keys.x = [{ t: 0.5, v: -30, ease: true }, { t: 2, v: 40, ease: false }, { t: 6, v: 10, ease: true }]

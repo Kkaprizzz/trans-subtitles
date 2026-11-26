@@ -12,10 +12,11 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/main/index.ts'),
-          'asr-worker': resolve('src/main/asr-worker.ts')
+          'asr-worker': resolve('src/main/asr-worker.ts'),
+          'face-worker': resolve('src/main/face-worker.ts')
         },
         // нативный аддон: подгружается из node_modules в рантайме
-        external: ['sherpa-onnx-node']
+        external: ['sherpa-onnx-node', 'onnxruntime-web']
       }
     }
   },

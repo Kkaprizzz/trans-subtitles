@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, canHaveEffects, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry } from '../../../shared/mix'
+import { addEffect, applyFaceTrack, canHaveEffects, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, insertShape, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry } from '../../../shared/mix'
 import { hasKeys } from '../../../shared/anim'
 import type { ShapeKind } from '../../../shared/shape'
 import type { BannerEntry } from '../../../shared/types'
@@ -50,6 +50,7 @@ import ClipsDialog, { type ClipsParams } from './ClipsDialog'
 import ExportDialog from './ExportDialog'
 import Inspector from './Inspector'
 import MediaPanel, { type LeftTab } from './MediaPanel'
+import FaceDialog from './FaceDialog'
 import FileView, { type FileViewHandle, type ViewFile } from './FileView'
 import Player, { type PlateStart, type ShapeEdit } from './Player'
 import type { Frame } from '../../../shared/frame'
@@ -228,6 +229,8 @@ export default function Editor(p: Props): React.JSX.Element {
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
   const [peaks, setPeaks] = useState<Record<string, Peaks>>({})
   const [exportOpen, setExportOpen] = useState(false)
+  // окно «Следить за лицом»: для какого куска открыто
+  const [faceItemId, setFaceItemId] = useState<string | null>(null)
   const [savedNote, setSavedNote] = useState<string | null>(null)
   // субтитры: выбранная дорожка, вкладка, слово, окошко правки в кадре, идёт ли распознавание
   const [subsSel, setSubsSel] = useState(false)
@@ -740,7 +743,7 @@ export default function Editor(p: Props): React.JSX.Element {
     const onKey = (e: KeyboardEvent): void => {
       const el = e.target as HTMLElement | null
       if (el && (el.isContentEditable || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || (el.tagName === 'INPUT' && !['range', 'checkbox', 'button'].includes((el as HTMLInputElement).type)))) return
-      if (exportOpen || clipsOpen || p.blocked) return
+      if (exportOpen || clipsOpen || faceItemId || p.blocked) return
       if (e.code === 'Escape' && markerPopId) {
         setMarkerPopId(null)
         return
@@ -922,7 +925,7 @@ export default function Editor(p: Props): React.JSX.Element {
   const clipsTarget = useMemo(() => {
     const t = subsTargets(project, selected).filter((i) => mediaOf(project, i.mediaId)?.hasVideo)
     return t[0] ?? null
-  }, [project, selected])
+  }, [project, selected, faceItemId])
   /** Отмена распознавания и поиска моментов: процессы прерываются, проект остаётся как был. */
   const cancelWork = (): void => {
     cancelledRef.current = true
@@ -1359,7 +1362,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onStyleReset={() => commit({ ...projectRef.current, style: null }, 'style')}
         />
       ) : (
-        <Inspector project={project} selected={selected} time={inspTime} getTime={getTime} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} onMessage={(m) => p.onError(m)} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
+        <Inspector project={project} selected={selected} time={inspTime} getTime={getTime} onFace={setFaceItemId} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} onMessage={(m) => p.onError(m)} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
       )}
 
       <section className="ed-timeline">
@@ -1484,6 +1487,19 @@ export default function Editor(p: Props): React.JSX.Element {
           onClose={() => setClipsOpen(false)}
           onOpenSettings={() => p.onOpenSettings('ai')}
           settingsOpen={p.blocked}
+        />
+      )}
+      {faceItemId && project.items.some((i) => i.id === faceItemId) && (
+        <FaceDialog
+          project={project}
+          item={project.items.find((i) => i.id === faceItemId) as Project['items'][number]}
+          time={time}
+          onClose={() => setFaceItemId(null)}
+          onApply={(track) => {
+            const r = applyFaceTrack(projectRef.current, faceItemId, track, projectRef.current.canvas)
+            commit(r.p)
+            return { keyed: r.keyed }
+          }}
         />
       )}
       {exportOpen && <ExportDialog project={project} progress={progress} onClose={() => setExportOpen(false)} onBusy={setExporting} />}

@@ -14,6 +14,7 @@ import { deleteProject, duplicateProject, exportProjectFile, importProjectFile, 
 import { exportClips, exportTimeline } from './exportTimeline'
 import { thumbnail } from './thumbs'
 import { addBanners, listBanners, removeBanner, renameBanner } from './banners'
+import { detectFaces, downloadFaceModel, facePreview, faceStatus } from './face'
 import { newProject, sanitizeProject, type Project } from '../shared/project'
 import { readFile as readFileAsync } from 'node:fs/promises'
 import { transcribe, transcribeRange } from './asr'
@@ -327,6 +328,30 @@ function registerIpc(): void {
     }
     return out
   })
+  // --- поиск лица: модель, кадр с рамками, трек по отрезку ---
+  let faceAbort: AbortController | null = null
+  ipcMain.handle('face:status', () => faceStatus())
+  ipcMain.handle('face:download', () => downloadFaceModel(send))
+  ipcMain.handle('face:preview', async (_e, mediaPath: string, t: number) => {
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
+    faceAbort = new AbortController()
+    try {
+      return await facePreview(mediaPath, Math.max(0, Number(t) || 0), faceAbort.signal)
+    } finally {
+      faceAbort = null
+    }
+  })
+  ipcMain.handle('face:track', async (_e, mediaPath: string, from: number, to: number, speaker: unknown) => {
+    if (!allowedMedia.has(mediaPath)) throw new Error('Файл не был выбран через диалог')
+    faceAbort = new AbortController()
+    try {
+      return await detectFaces(mediaPath, Math.max(0, Number(from) || 0), Math.max(0, Number(to) || 0), 4, send, faceAbort.signal, speaker === true)
+    } finally {
+      faceAbort = null
+    }
+  })
+  ipcMain.handle('face:cancel', () => faceAbort?.abort())
+
   // --- библиотека баннеров: общая для всех проектов, хранит ссылки на файлы ---
   /** Каждый файл из библиотеки разрешён к показу окну (после перезапуска приложения тоже). */
   const listAllowed = async (): Promise<Awaited<ReturnType<typeof listBanners>>> => {

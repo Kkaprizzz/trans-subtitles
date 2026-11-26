@@ -7,10 +7,16 @@ directories:
 files:
   - out/**
   - package.json
+  # поиск лиц: из onnxruntime-web нужны только вариант для Node и его wasm (остальные сборки — десятки МБ)
+  - "!**/node_modules/onnxruntime-web/dist/**"
+  - "**/node_modules/onnxruntime-web/dist/ort.node.min.js"
+  - "**/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs"
+  - "**/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm"
 asar: true
 # нативные модули и бинарники нельзя запускать изнутри asar
 asarUnpack:
   - "**/node_modules/sherpa-onnx-*/**"
+  - "**/node_modules/onnxruntime-web/dist/**"
   - "**/node_modules/ffmpeg-static/ffmpeg*"
   - "**/node_modules/ffprobe-static/bin/**"
 publish:

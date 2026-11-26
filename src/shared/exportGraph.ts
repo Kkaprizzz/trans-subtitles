@@ -7,7 +7,7 @@
  * они встают в тот же порядок слоёв, что и видео. Звук: все куски со звуком (кроме заглушённых дорожек)
  * задерживаются на свой start и сводятся без нормализации.
  */
-import { animExpr, isAnimated, type Expr } from './anim.ts'
+import { animExpr, isAnimated, keysExpr, type Expr } from './anim.ts'
 import { gainExpr, gainPeak } from './audio.ts'
 import { effectFilters } from './effects.ts'
 import { fitSize, flipFilters, frameFilters, isStillFrame } from './frame.ts'
@@ -97,6 +97,16 @@ export function tempoFilter(speed: number): string {
   }
   parts.push(s)
   return parts.map((x) => `atempo=${x.toFixed(4)}`).join(',')
+}
+
+/** Положение лица (доля ширины картинки) как выражение ffmpeg от времени t таймлайна: плавно между точками трека, за краями — крайняя. */
+export function faceExpr(it: Project['items'][number]): string {
+  const track = it.face ?? []
+  // выражение не бесконечной длины: у долгого куска точек не больше 150 (берём ровными шагами)
+  const step = Math.max(1, Math.ceil(track.length / 150))
+  const pts = track.filter((_, i) => i % step === 0 || i === track.length - 1)
+  const keys = pts.map((q) => ({ t: Math.round((it.start + (q.t - it.in) / it.speed) * 1000) / 1000, v: q.x, ease: true }))
+  return keysExpr(keys, 't')
 }
 
 const f3 = (x: number): string => (Math.round(x * 1000) / 1000).toFixed(3)
@@ -194,7 +204,9 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const tail = opaque ? scaleSteps : []
           const vOut = first.length || opaque ? `f${k}` : `v${k}`
           if (framed && o.framing) {
-            graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k)))
+            // кроп клипа едет за лицом, если у куска есть трек: точки трека переводятся во время таймлайна (скорость учтена)
+            const follow = it.face && o.framing.mode === 'crop' && it.face.length > 0 ? faceExpr(it) : undefined
+            graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k), follow))
           } else {
             graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${timing}[${vOut}]`)
           }

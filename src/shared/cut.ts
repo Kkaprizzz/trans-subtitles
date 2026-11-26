@@ -248,12 +248,16 @@ const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
  * crop: заполняем кадр (масштаб с запасом) и режем со сдвигом offsetX по горизонтали.
  * fit-blur: фон — та же картинка, уменьшенная, размытая и растянутая; сверху видео целиком.
  */
-export function framingChain(input: string, output: string, framing: Framing, offsetX: number, W: number, H: number, tag: string): string[] {
+export function framingChain(input: string, output: string, framing: Framing, offsetX: number, W: number, H: number, tag: string, follow?: string): string[] {
   const w = even(W)
   const h = even(H)
   if (framing === 'crop') {
-    const ox = clamp(offsetX, 0, 1).toFixed(4)
-    return [`[${input}]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}:(iw-ow)*${ox}:(ih-oh)/2,setsar=1[${output}]`]
+    // follow — выражение от времени t: где лицо (доля ширины картинки). Окно кропа ставится лицом в центр, ручной сдвиг клипа
+    // (offsetX, 0.5 — без сдвига) добавляется поверх; за края картинки окно не выходит
+    const x = follow
+      ? `'clip((${follow})*iw-ow/2+${(clamp(offsetX, 0, 1) - 0.5).toFixed(4)}*(iw-ow),0,iw-ow)'`
+      : `(iw-ow)*${clamp(offsetX, 0, 1).toFixed(4)}`
+    return [`[${input}]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}:${x}:(ih-oh)/2,setsar=1[${output}]`]
   }
   const bw = even(w / 4)
   const bh = even(h / 4)

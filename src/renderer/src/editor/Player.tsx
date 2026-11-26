@@ -8,6 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { fontFamilyOf } from '../../../shared/fonts'
 import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
 import { animAt, isAnimated, propAt, type Anim } from '../../../shared/anim'
+import { faceAt, followOffset } from '../../../shared/face'
 import { gainAt } from '../../../shared/audio'
 import { cssFilter } from '../../../shared/effects'
 import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
@@ -411,7 +412,13 @@ export default function Player(p: Props): React.JSX.Element {
         // кадр клипа: куски его файла заполняют вертикаль (кроп со сдвигом) или лежат целиком поверх размытого фона
         const framed = !!cv && it.mediaId === cv.mediaId
         el.style.objectFit = framed && cv.mode === 'crop' ? 'cover' : 'contain'
-        el.style.objectPosition = framed && cv.mode === 'crop' ? `${cv.offsetX * 100}% 50%` : '50% 50%'
+        // с треком лица окно кропа ставит лицо в центр (ручной сдвиг клипа добавляется поверх); без трека — статичный сдвиг
+        let posX = cv?.offsetX ?? 0.5
+        if (framed && cv.mode === 'crop' && it.face && it.face.length > 0 && m.width && m.height) {
+          const srcT = activeIds.has(it.id) ? sourceTime(it, t) : it.in
+          posX = followOffset(faceAt(it.face, srcT), frameH * (m.width / m.height), frameW, cv.offsetX)
+        }
+        el.style.objectPosition = framed && cv.mode === 'crop' ? `${posX * 100}% 50%` : '50% 50%'
         // эффекты куска (блюр — в долях высоты кадра, как в экспорте)
         el.style.filter = cssFilter(it.effects, frameH)
         // кадр куска: кроп режет края вписанной картинки (clip-path в px элемента); положение, масштаб и прозрачность — по времени

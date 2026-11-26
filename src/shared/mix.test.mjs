@@ -543,7 +543,7 @@ void subsOf
   // кадр
   assert.ok(isDefaultFrame(DEFAULT_FRAME))
   assert.equal(frameFilters(DEFAULT_FRAME, 1280, 720), null, 'по умолчанию граф не меняется')
-  assert.deepEqual(cleanFrame({ scale: 9999, x: -500, cl: 99, cr: 99, ct: 'x' }), { scale: 400, x: -100, y: 0, cl: 90, cr: 5, ct: 0, cb: 0, opacity: 100, flipH: 0, flipV: 0 }, 'зажато, кроп не съедает картинку')
+  assert.deepEqual(cleanFrame({ scale: 9999, x: -500, cl: 99, cr: 99, ct: 'x' }), { scale: 400, x: -150, y: 0, cl: 90, cr: 5, ct: 0, cb: 0, opacity: 100, flipH: 0, flipV: 0 }, 'зажато, кроп не съедает картинку')
   assert.deepEqual(cleanFrame(null), DEFAULT_FRAME)
   assert.equal(patchFrameValues(DEFAULT_FRAME, { cl: 80 }).cl, 80)
   const both = patchFrameValues({ ...DEFAULT_FRAME, cr: 60 }, { cl: 80 }, 'cl')
