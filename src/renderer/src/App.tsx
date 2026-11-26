@@ -288,7 +288,16 @@ export default function App(): React.JSX.Element {
               Обновить до {update.version}
             </button>
           )}
-          {update?.state === 'downloading' && <div className="toast dim">Скачиваю обновление {update.version}…</div>}
+          {update?.state === 'downloading' && (
+            <div className="toast dim">
+              Найдена версия {update.version} · скачиваю{update.percent ? ` ${update.percent}%` : '…'}
+            </div>
+          )}
+          {update?.state === 'error' && (
+            <div className="toast err" role="alert" onClick={() => setUpdate(null)} title="Закрыть">
+              Не удалось обновиться до {update.version}: {update.message}
+            </div>
+          )}
         </div>
       )}
     </div>

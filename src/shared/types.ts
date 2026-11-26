@@ -241,6 +241,8 @@ export interface AnalyzeResponse {
 export interface UpdateEvent {
   state: 'downloading' | 'ready' | 'error'
   version?: string
+  /** доля скачанного, 0..100 (только при downloading) */
+  percent?: number
   message?: string
 }
 
