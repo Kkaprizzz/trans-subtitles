@@ -1850,7 +1850,7 @@ textarea {
 }
 .fx-param {
   display: grid;
-  grid-template-columns: 92px 1fr 30px;
+  grid-template-columns: 92px 1fr 46px;
   align-items: center;
   gap: 8px;
   font-size: 12px;
@@ -1865,11 +1865,14 @@ textarea {
 }
 .frame-field {
   display: grid;
-  grid-template-columns: 96px 1fr 52px;
+  grid-template-columns: 96px 1fr 52px 22px;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--ink-2);
+}
+.frame-field:not(.has-kf)::after {
+  content: '';
 }
 .frame-field input[type='range'] {
   min-width: 0;
@@ -1937,4 +1940,125 @@ textarea {
     height: auto;
     aspect-ratio: 16 / 9;
   }
+}
+
+/* обёртка надписи: сдвиг, масштаб и прозрачность по анимации; сама плашка внутри позиционируется как раньше */
+.pl-anim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ромбик ключевых кадров у поля инспектора */
+.kf-btn {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--ink-3);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease);
+}
+.kf-btn:hover {
+  color: var(--ink);
+}
+.kf-btn.on {
+  color: var(--accent);
+}
+.fx-choice {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+.fx-choice .seg button {
+  min-width: 0;
+  padding: 5px 2px;
+  font-size: 11px;
+}
+.fx-box {
+  min-width: 0;
+}
+.fx-param > * {
+  min-width: 0;
+}
+
+/* вкладка «Эффекты»: две группы */
+.fx-group {
+  margin: 10px 2px 2px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.fx-swatch.fadeIn {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 85%);
+  mask-image: linear-gradient(90deg, transparent, #000 85%);
+}
+.fx-swatch.fadeOut {
+  -webkit-mask-image: linear-gradient(90deg, #000 15%, transparent);
+  mask-image: linear-gradient(90deg, #000 15%, transparent);
+}
+.fx-swatch.zoom {
+  background-size: 170% 100%;
+  background-position: 50% 0;
+  box-shadow: inset 0 0 0 4px var(--panel);
+}
+.fx-swatch.slideIn {
+  clip-path: inset(0 0 0 38%);
+}
+.fx-swatch.slideOut {
+  clip-path: inset(0 38% 0 0);
+}
+.fx-swatch.pop {
+  clip-path: circle(46% at 50% 50%);
+}
+
+/* полоса ключевых кадров на куске таймлайна */
+.tr-kf {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 12px;
+  pointer-events: auto;
+}
+.tr-kf-dot {
+  position: absolute;
+  bottom: 1px;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  padding: 0;
+  color: #f2f2f4;
+  background: transparent;
+  border: 0;
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+.tr-kf-dot svg {
+  display: block;
+  width: 11px;
+  height: 11px;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+}
+.tr-kf-dot.sel {
+  color: var(--accent);
+}
+.tr-bevel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: rgba(14, 14, 16, 0.55);
+}
+.tr-bevel.in {
+  left: 0;
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+.tr-bevel.out {
+  right: 0;
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
 }

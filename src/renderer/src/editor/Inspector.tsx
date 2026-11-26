@@ -1,11 +1,12 @@
 /** Инспектор: свойства выделенного куска или, если ничего не выделено, — проекта. */
 import { memo, useState } from 'react'
 import { deleteClip, patchClip, placement } from '../../../shared/cut'
+import { hasKeys, KEY_PROPS, type KeyProp } from '../../../shared/anim'
 import { EFFECTS } from '../../../shared/effects'
 import { FONTS, fontById } from '../../../shared/fonts'
-import { FRAME_LIMITS, isDefaultFrame, type Frame, type FrameKey } from '../../../shared/frame'
+import { FRAME_LIMITS, isDefaultFrame, type FrameKey } from '../../../shared/frame'
 import { MAX_PLATE_TEXT, PLATE_LIMITS, type Plate } from '../../../shared/plate'
-import { canHaveEffects, clampSpeed, patchEffect, patchFrame, patchPlate, removeEffect, resetFrame, setFreezeLength, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
+import { canHaveEffects, clampSpeed, disableKeys, enableKeys, frameValueAt, hasFrameCrop, patchEffect, patchFrame, patchPlate, removeEffect, resetFrame, setFreezeLength, setPropAt, setSpeed, SPEED_PRESETS } from '../../../shared/mix'
 import { itemDur, itemEnd, mediaOf, projectDuration, subsOf, trackName, trackOf, trimItem, unlinkSubs, type Clip, type Item, type Project } from '../../../shared/project'
 import { MARKER_PALETTE } from './Tracks'
 import { fmtTime } from '../format'
@@ -13,6 +14,10 @@ import { fmtTime } from '../format'
 interface Props {
   project: Project
   selected: string[]
+  /** время курсора, если у выделенного куска есть ключи (поля идут за курсором); иначе −1 */
+  time: number
+  /** время курсора прямо сейчас (для ромбиков и правок) */
+  getTime(): number
   onCommit(next: Project, key?: string): void
   onSeek(t: number): void
   /** открыть окошко метки на таймлайне */
@@ -238,11 +243,12 @@ function FreezeRow(p: { project: Project; item: Item; onCommit(next: Project, ke
   )
 }
 
-/** Эффекты куска: у каждого заголовок (глаз «вкл/выкл», удалить) и ползунки его параметров. */
+/** Эффекты куска: у каждого заголовок (глаз «вкл/выкл», удалить) и параметры — ползунки или выбор из вариантов. */
 function EffectsBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+  const text = p.item.kind === 'text'
   return (
     <div className="insp-col">
-      <span>Эффекты</span>
+      <span>{text ? 'Анимации' : 'Эффекты'}</span>
       {p.item.effects.length === 0 && <span className="dim fx-none">Пока нет: вкладка «Эффекты» слева в панели медиа</span>}
       {p.item.effects.map((e) => (
         <div key={e.id} className={`fx-box${e.on ? '' : ' off'}`}>
@@ -255,40 +261,72 @@ function EffectsBlock(p: { project: Project; item: Item; onCommit(next: Project,
               ×
             </button>
           </div>
-          {EFFECTS[e.type].params.map((pr) => (
-            <label key={pr.key} className="fx-param">
-              <span>{pr.title}</span>
-              <input
-                type="range"
-                min={pr.min}
-                max={pr.max}
-                step={1}
-                value={e.values[pr.key] ?? pr.default}
-                onChange={(ev) => p.onCommit(patchEffect(p.project, p.item.id, e.id, { key: pr.key, value: Number(ev.target.value) }), `fx-${e.id}-${pr.key}`)}
-                aria-label={`${EFFECTS[e.type].title}: ${pr.title}`}
-              />
-              <span className="mono fx-val">{e.values[pr.key] ?? pr.default}</span>
-            </label>
-          ))}
+          {EFFECTS[e.type].params.map((pr) => {
+            const val = e.values[pr.key] ?? pr.default
+            if (pr.options) {
+              return (
+                <div key={pr.key} className="fx-param fx-choice">
+                  <span>{pr.title}</span>
+                  <div className="seg" role="radiogroup" aria-label={`${EFFECTS[e.type].title}: ${pr.title}`}>
+                    {pr.options.map((o, i) => (
+                      <button key={o} role="radio" aria-checked={val === i} className={val === i ? 'on' : ''} onClick={() => p.onCommit(patchEffect(p.project, p.item.id, e.id, { key: pr.key, value: i }))}>
+                        {o}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            }
+            return (
+              <label key={pr.key} className="fx-param">
+                <span>{pr.title}</span>
+                <input
+                  type="range"
+                  min={pr.min}
+                  max={pr.max}
+                  step={pr.step ?? 1}
+                  value={val}
+                  onChange={(ev) => p.onCommit(patchEffect(p.project, p.item.id, e.id, { key: pr.key, value: Number(ev.target.value) }), `fx-${e.id}-${pr.key}`)}
+                  aria-label={`${EFFECTS[e.type].title}: ${pr.title}`}
+                />
+                <span className="mono fx-val">
+                  {val}
+                  {pr.unit ? ` ${pr.unit}` : ''}
+                </span>
+              </label>
+            )
+          })}
         </div>
       ))}
     </div>
   )
 }
 
-const FRAME_ROWS: Array<{ key: FrameKey; title: string }> = [
+const FRAME_ROWS: Array<{ key: FrameKey; title: string; textTitle?: string }> = [
   { key: 'scale', title: 'Масштаб, %' },
-  { key: 'x', title: 'Положение X, %' },
-  { key: 'y', title: 'Положение Y, %' },
+  { key: 'x', title: 'Положение X, %', textTitle: 'Сдвиг X, %' },
+  { key: 'y', title: 'Положение Y, %', textTitle: 'Сдвиг Y, %' },
+  { key: 'opacity', title: 'Прозрачность, %' },
   { key: 'cl', title: 'Кроп слева, %' },
   { key: 'cr', title: 'Кроп справа, %' },
   { key: 'ct', title: 'Кроп сверху, %' },
   { key: 'cb', title: 'Кроп снизу, %' }
 ]
 
-/** Один числовой ввод кадра: правка применяется по Enter/уходу из поля, ползунок — сразу. */
-function FrameField(p: { frame: Frame; k: FrameKey; title: string; onChange(k: FrameKey, v: number, live: boolean): void }): React.JSX.Element {
-  const val = p.frame[p.k]
+/** Ромбик у поля: включён — свойство меняется по времени (правки ставят ключи), выключен — одно значение на весь кусок. */
+function KeyDiamond(p: { on: boolean; title: string; onClick(): void }): React.JSX.Element {
+  return (
+    <button className={`kf-btn${p.on ? ' on' : ''}`} aria-pressed={p.on} title={p.title} aria-label={p.title} onClick={p.onClick}>
+      <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true">
+        <path d="M7 1.4 12.6 7 7 12.6 1.4 7Z" fill={p.on ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      </svg>
+    </button>
+  )
+}
+
+/** Один числовой ввод кадра: правка применяется по Enter/уходу из поля, ползунок — сразу. key — ромбик ключевых кадров (если свойство анимируется). */
+function FrameField(p: { value: number; k: FrameKey; title: string; keyed?: { on: boolean; title: string; onToggle(): void }; onChange(k: FrameKey, v: number, live: boolean): void }): React.JSX.Element {
+  const val = p.value
   const [text, setText] = useState(String(val))
   const [seen, setSeen] = useState(val)
   if (seen !== val) {
@@ -297,9 +335,9 @@ function FrameField(p: { frame: Frame; k: FrameKey; title: string; onChange(k: F
   }
   const [lo, hi] = FRAME_LIMITS[p.k]
   return (
-    <label className="frame-field">
+    <label className={`frame-field${p.keyed ? ' has-kf' : ''}`}>
       <span>{p.title}</span>
-      <input type="range" min={lo} max={hi} step={p.k === 'scale' || p.k === 'x' || p.k === 'y' ? 1 : 1} value={val} onChange={(e) => p.onChange(p.k, Number(e.target.value), true)} aria-label={p.title} />
+      <input type="range" min={lo} max={hi} step={1} value={Math.round(val)} onChange={(e) => p.onChange(p.k, Number(e.target.value), true)} aria-label={p.title} />
       <input
         type="text"
         inputMode="decimal"
@@ -317,29 +355,52 @@ function FrameField(p: { frame: Frame; k: FrameKey; title: string; onChange(k: F
           e.stopPropagation()
         }}
       />
+      {p.keyed && <KeyDiamond on={p.keyed.on} title={p.keyed.title} onClick={p.keyed.onToggle} />}
     </label>
   )
 }
 
-/** Кадр куска: масштаб, положение, кроп; «Сбросить». Мышью — рамка в предпросмотре. */
-function FrameBlock(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void }): React.JSX.Element {
+const CROP_KEYS: FrameKey[] = ['cl', 'cr', 'ct', 'cb']
+const isKeyProp = (k: FrameKey): k is KeyProp => (KEY_PROPS as string[]).includes(k)
+
+/**
+ * Кадр куска: масштаб, положение, прозрачность (у каждого ромбик ключевых кадров) и кроп; «Сбросить». Мышью — рамка в превью.
+ * У надписи кропа нет, а X/Y — сдвиг от её положения.
+ */
+function FrameBlock(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void }): React.JSX.Element {
   const f = p.item.frame
+  const text = p.item.kind === 'text'
+  const id = p.item.id
+  const toggle = (k: KeyProp): void => {
+    const n = p.item.keys[k].length
+    if (n === 0) p.onCommit(enableKeys(p.project, id, k, p.getTime()))
+    else if (n === 1 || window.confirm('Убрать все ключевые кадры этого свойства? Останется значение в текущей точке.')) p.onCommit(disableKeys(p.project, id, k, p.getTime()))
+  }
   return (
     <div className="insp-col">
       <span>Кадр</span>
       <div className="frame-grid">
-        {FRAME_ROWS.map((r) => (
-          <FrameField
-            key={r.key}
-            frame={f}
-            k={r.key}
-            title={r.title}
-            onChange={(k, v, live) => p.onCommit(patchFrame(p.project, p.item.id, { [k]: v }, k), live ? `fr-${p.item.id}-${k}` : undefined)}
-          />
-        ))}
+        {FRAME_ROWS.filter((r) => !(text && CROP_KEYS.includes(r.key))).map((r) => {
+          const k = r.key
+          const keyed = isKeyProp(k) && p.item.keys[k].length > 0
+          const value = isKeyProp(k) && keyed ? frameValueAt(p.item, k, p.time) : f[k]
+          const title = text && r.textTitle ? r.textTitle : r.title
+          return (
+            <FrameField
+              key={k}
+              value={Math.round(value * 100) / 100}
+              k={k}
+              title={title}
+              keyed={isKeyProp(k) ? { on: keyed, title: keyed ? 'Убрать ключевые кадры' : 'Анимировать: ключевые кадры', onToggle: () => toggle(k) } : undefined}
+              onChange={(kk, v, live) =>
+                p.onCommit(isKeyProp(kk) ? setPropAt(p.project, id, kk, p.getTime(), v) : patchFrame(p.project, id, { [kk]: v }, kk), live ? `fr-${id}-${kk}` : undefined)
+              }
+            />
+          )
+        })}
       </div>
       <div className="insp-link">
-        <button className="btn small" disabled={isDefaultFrame(f)} onClick={() => p.onCommit(resetFrame(p.project, p.item.id))}>
+        <button className="btn small" disabled={isDefaultFrame(f) && !hasKeys(p.item.keys)} onClick={() => p.onCommit(resetFrame(p.project, id))}>
           Сбросить
         </button>
       </div>
@@ -381,7 +442,7 @@ function NumField(p: { title: string; value: number; lo: number; hi: number; ste
 }
 
 /** Панель надписи: текст, шрифт, размер, цвет, выравнивание, обводка, тень, положение и ширина, длительность. */
-function TextPanel(p: { project: Project; item: Item; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element | null {
+function TextPanel(p: { project: Project; item: Item; time: number; getTime(): number; onCommit(next: Project, key?: string): void; onMessage(msg: string): void }): React.JSX.Element | null {
   const pl = p.item.plate
   const [lenText, setLenText] = useState(String(Math.round(itemDur(p.item) * 100) / 100))
   const [lenSeen, setLenSeen] = useState(itemDur(p.item))
@@ -492,6 +553,8 @@ function TextPanel(p: { project: Project; item: Item; onCommit(next: Project, ke
         <NumField title="Положение X, %" value={pl.x} lo={PLATE_LIMITS.x[0]} hi={PLATE_LIMITS.x[1]} onChange={(v, live) => patch({ x: v }, live ? `px-${id}` : undefined)} />
         <NumField title="Положение Y, %" value={pl.y} lo={PLATE_LIMITS.y[0]} hi={PLATE_LIMITS.y[1]} onChange={(v, live) => patch({ y: v }, live ? `py-${id}` : undefined)} />
         <NumField title="Ширина, %" value={pl.width} lo={PLATE_LIMITS.width[0]} hi={PLATE_LIMITS.width[1]} onChange={(v, live) => patch({ width: v }, live ? `pw-${id}` : undefined)} />
+        <FrameBlock project={p.project} item={p.item} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />
+        <EffectsBlock project={p.project} item={p.item} onCommit={p.onCommit} />
       </div>
     </aside>
   )
@@ -502,7 +565,7 @@ function Inspector(p: Props): React.JSX.Element {
   if (p.clip) return <ClipPanel key={p.clip.id} project={pr} clip={p.clip} onCommit={p.onCommit} onSeek={p.onSeek} onFocus={p.onFocusClip} onGone={p.onClipGone} />
   const one = p.selected.length === 1 ? pr.items.find((i) => i.id === p.selected[0]) : undefined
   const m = one ? mediaOf(pr, one.mediaId) : undefined
-  if (one && one.kind === 'text') return <TextPanel key={one.id} project={pr} item={one} onCommit={p.onCommit} onMessage={p.onMessage} />
+  if (one && one.kind === 'text') return <TextPanel key={one.id} project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} onMessage={p.onMessage} />
 
   if (one && m) {
     const track = trackOf(pr, one.trackId)
@@ -529,7 +592,7 @@ function Inspector(p: Props): React.JSX.Element {
           </dl>
           <SpeedRow project={pr} ids={[one.id]} onCommit={p.onCommit} onMessage={p.onMessage} />
           {one.kind === 'freeze' && <FreezeRow key={one.id} project={pr} item={one} onCommit={p.onCommit} onMessage={p.onMessage} />}
-          {canHaveEffects(pr, one) && <FrameBlock project={pr} item={one} onCommit={p.onCommit} />}
+          {hasFrameCrop(pr, one) && <FrameBlock project={pr} item={one} time={p.time} getTime={p.getTime} onCommit={p.onCommit} />}
           {canHaveEffects(pr, one) && <EffectsBlock project={pr} item={one} onCommit={p.onCommit} />}
           {subsOf(pr, one.id).length > 0 && (
             <div className="insp-link">

@@ -9,10 +9,11 @@
  * щелчок открывает окошко (текст, цвет, удалить).
  */
 import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { animSet } from '../../../shared/anim'
 import { gainAt } from '../../../shared/audio'
 import { EFFECT_MIME, EFFECTS, type EffectType } from '../../../shared/effects'
 import { plateLabel } from '../../../shared/plate'
-import { addGainPoint, attachAudio, canJoin, deleteGainPoint, detachAudio, hasSound, insertFreeze, joinWithNeighbor, moveGainPoint, setBaseVolume, setFreezeLength } from '../../../shared/mix'
+import { addGainPoint, addKeysAtTime, attachAudio, canJoin, deleteGainPoint, deleteKeysAtTime, detachAudio, hasSound, insertFreeze, joinWithNeighbor, keyTimes, moveGainPoint, moveKeysAtTime, setBaseVolume, setEaseAtTime, setFreezeLength } from '../../../shared/mix'
 import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
   MARKER_COLORS,
@@ -132,6 +133,7 @@ type Drag =
   | { kind: 'marker'; id: string; x0: number; moved: boolean }
   | { kind: 'gain-base'; id: string; p0: Project; top: number; h: number }
   | { kind: 'gain-pt'; id: string; idx: number; p0: Project; top: number; h: number }
+  | { kind: 'key'; id: string; rel: number; p0: Project }
   | { kind: 'clip-move'; id: string; p0: Project; x0: number; moved: boolean }
   | { kind: 'clip-trim'; id: string; edge: 'start' | 'end'; p0: Project; moved: boolean }
   | { kind: 'scrub' }
@@ -267,6 +269,40 @@ function GainLine(p: {
   )
 }
 
+/**
+ * Полоса ключевых кадров на куске: ромбик на каждый момент, где у куска есть ключи (все свойства в этой точке — один ромбик).
+ * Тянуть — двигать по времени, правый щелчок — меню, двойной щелчок по полосе — добавить ключи в этой точке.
+ */
+function KeyStrip(p: {
+  item: Item
+  view: TimelineView
+  /** время таймлайна у левого края отрисованной части куска */
+  from: number
+  width: number
+  selRel: number | null
+  onDown(e: React.PointerEvent, rel: number): void
+  onMenu(e: React.MouseEvent, rel: number): void
+}): React.JSX.Element | null {
+  const times = keyTimes(p.item)
+  if (times.length === 0) return null
+  return (
+    <div className="tr-kf">
+      {times.map((rel) => {
+        const x = timeToX(p.item.start + rel, p.view) - timeToX(p.from, p.view)
+        if (x < -5 || x > p.width + 5) return null
+        const sel = p.selRel !== null && Math.abs(p.selRel - rel) < 0.011
+        return (
+          <button key={rel} className={`tr-kf-dot${sel ? ' sel' : ''}`} style={{ left: x }} onPointerDown={(e) => p.onDown(e, rel)} onContextMenu={(e) => p.onMenu(e, rel)} title="Ключевой кадр: тяни по времени, правый щелчок — меню" aria-label="Ключевой кадр">
+            <svg viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M5 0.6 9.4 5 5 9.4 0.6 5Z" fill="currentColor" stroke="rgba(0,0,0,.55)" strokeWidth="0.8" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 /** Окошко метки: текст, цвет, удалить. */
 function MarkerPop(p: { marker: Marker; x: number; y: number; onText(t: string): void; onColor(c: number): void; onDelete(): void; onClose(): void }): React.JSX.Element {
   const ref = useRef<HTMLInputElement>(null)
@@ -318,7 +354,31 @@ function Tracks(p: Props): React.JSX.Element {
     | { kind: 'item'; x: number; y: number; itemId: string; t: number }
     | { kind: 'line'; x: number; y: number; itemId: string; t: number }
     | { kind: 'point'; x: number; y: number; itemId: string; idx: number }
+    | { kind: 'key'; x: number; y: number; itemId: string; rel: number }
   const [menu, setMenu] = useState<Menu | null>(null)
+  // выбранный ромбик ключей: Delete удаляет его, пока ничего другого не выбрали
+  const [selKey, setSelKey] = useState<{ id: string; rel: number } | null>(null)
+  const projectRef = useRef(p.project)
+  projectRef.current = p.project
+  const commitRef = useRef(p.onCommit)
+  commitRef.current = p.onCommit
+  useEffect(() => {
+    if (!selKey) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.code !== 'Delete' && e.code !== 'Backspace') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      e.stopImmediatePropagation()
+      e.preventDefault()
+      commitRef.current(deleteKeysAtTime(projectRef.current, selKey.id, selKey.rel))
+      setSelKey(null)
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [selKey])
+  useEffect(() => {
+    if (selKey && !p.selected.includes(selKey.id)) setSelKey(null)
+  }, [p.selected, selKey])
   // та же плавающая менюшка, но по границам окна: если не влезает — поднимается/сдвигается, чтобы не обрезаться
   const menuRef = useRef<HTMLDivElement>(null)
   const [menuPos, setMenuPos] = useState({ left: 0, top: 0, ready: false })
@@ -508,6 +568,7 @@ function Tracks(p: Props): React.JSX.Element {
     e.stopPropagation()
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     p.onMarkerPop(null)
+    setSelKey(null)
     const multi = e.ctrlKey || e.metaKey || e.shiftKey
     if (multi) p.onSelect(p.selected.includes(it.id) ? p.selected.filter((x) => x !== it.id) : [...p.selected, it.id])
     else if (!p.selected.includes(it.id)) p.onSelect([it.id])
@@ -525,6 +586,17 @@ function Tracks(p: Props): React.JSX.Element {
     }
   }
 
+  const startKey = (e: React.PointerEvent, it: Item, rel: number): void => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    ;(e.currentTarget as unknown as Element).setPointerCapture(e.pointerId)
+    p.onMarkerPop(null)
+    p.onSelect([it.id])
+    p.onSelectClip(null)
+    p.onSelectTrack(it.trackId)
+    setSelKey({ id: it.id, rel })
+    dragRef.current = { kind: 'key', id: it.id, rel, p0: p.project }
+  }
   const startGain = (e: React.PointerEvent, it: Item, top: number, h: number, idx: number | null): void => {
     if (e.button !== 0) return
     e.stopPropagation()
@@ -559,6 +631,13 @@ function Tracks(p: Props): React.JSX.Element {
     if (!it) return []
     if (m.kind === 'line') return [{ label: 'Добавить точку', run: () => p.onCommit(addGainPoint(pr, it.id, m.t).p) }]
     if (m.kind === 'point') return [{ label: 'Удалить точку', run: () => p.onCommit(deleteGainPoint(pr, it.id, m.idx)) }]
+    if (m.kind === 'key') {
+      const smooth = [...it.keys.x, ...it.keys.y, ...it.keys.scale, ...it.keys.opacity].some((k) => Math.abs(k.t - m.rel) < 0.011 && k.ease)
+      return [
+        { label: smooth ? 'Линейно' : 'Плавно', run: () => p.onCommit(setEaseAtTime(pr, it.id, m.rel, !smooth)) },
+        { label: 'Удалить ключ', key: 'Delete', run: () => { setSelKey(null); p.onCommit(deleteKeysAtTime(pr, it.id, m.rel)) } }
+      ]
+    }
     const out: Array<{ label: string; key?: string; run(): void }> = []
     out.push({ label: 'Копировать', key: 'Ctrl+C', run: p.onCopy }, { label: 'Вырезать', key: 'Ctrl+X', run: p.onCut })
     if (p.canPaste) out.push({ label: 'Вставить', key: 'Ctrl+V', run: p.onPaste })
@@ -661,6 +740,18 @@ function Tracks(p: Props): React.JSX.Element {
     }
     if (d.kind === 'gain-base') {
       p.onCommit(setBaseVolume(d.p0, d.id, 1 - (y - d.top - GAIN_PAD) / (d.h - 2 * GAIN_PAD)), `gb-${d.id}`)
+      return
+    }
+    if (d.kind === 'key') {
+      const tl = xToTime(x, view)
+      const next = moveKeysAtTime(d.p0, d.id, d.rel, tl)
+      p.onCommit(next, `kf-${d.id}-${d.rel}`)
+      // выбранным остаётся тот же ромбик, уже на новом месте (Delete удалит его)
+      const moved = next.items.find((i) => i.id === d.id)
+      if (moved) {
+        const near = keyTimes(moved).sort((a, b) => Math.abs(a - (tl - moved.start)) - Math.abs(b - (tl - moved.start)))[0]
+        if (near !== undefined) setSelKey({ id: d.id, rel: near })
+      }
       return
     }
     if (d.kind === 'gain-pt') {
@@ -929,6 +1020,10 @@ function Tracks(p: Props): React.JSX.Element {
           // у видеокуска картинка сверху, звук — узкой полосой под ней; у звукового куска всё в одном
           const picH = onVideoTrack ? PIC_H : row.h
           const cls = `tr-item ${isSubs ? 'subs' : isVideo || isText ? 'video' : 'audio'}${isFreeze ? ' freeze' : ''}${isText ? ' text' : ''}${fxOver === it.id ? ' fx-over' : ''}${sel ? ' sel' : ''}${dragging ? ' lifted' : ''}${row.track.muted ? ' muted' : ''}${row.track.hidden ? ' hid' : ''}${locked ? ' locked' : ''}`
+          // скосы «появление» и «исчезновение»: шириной в оставшуюся длительность (после резки она может быть короче)
+          const anim = animSet(it.effects)
+          const fadeIn = anim.fadeIn ? Math.max(0, anim.fadeIn.d - anim.fadeIn.sk) : 0
+          const fadeOut = anim.fadeOut ? Math.max(0, anim.fadeOut.d - anim.fadeOut.sk) : 0
           const fxNames = it.effects.filter((e) => e.on).map((e) => EFFECTS[e.type].title.toLowerCase())
           const label = isSubs ? `Субтитры${it.link ? '' : ' · свои'}` : isFreeze ? 'Стоп-кадр' : isText && it.plate ? plateLabel(it.plate) : (m?.name ?? '—')
           const srcFrom = tlToSrc(it, visFrom)
@@ -952,6 +1047,11 @@ function Tracks(p: Props): React.JSX.Element {
                 style={{ left, width, top: row.top, height: picH }}
                 onPointerDown={(e) => startItem(e, it, 'move')}
                 onContextMenu={itemMenu}
+                onDoubleClick={(e) => {
+                  // двойной щелчок по полосе ключей внизу куска: ключи в этой точке (событие приходит на кусок: он держит захват указателя)
+                  const r = e.currentTarget.getBoundingClientRect()
+                  if (onVideoTrack && !isSubs && keyTimes(it).length > 0 && e.clientY > r.bottom - 14) p.onCommit(addKeysAtTime(p.project, it.id, xToTime(local(e).x, view)))
+                }}
                 title={`${label} · ${fmtTime(it.start)}–${fmtTime(end)} · ${itemDur(it).toFixed(1)} с`}
               >
                 {pk && !onVideoTrack && <Wave peaks={pk} from={srcFrom} to={srcTo} width={Math.round(width)} height={row.h - 2} />}
@@ -964,6 +1064,19 @@ function Tracks(p: Props): React.JSX.Element {
                     {it.speed !== 1 && <span className="mono tr-speed"> ×{it.speed}</span>}
                     {fxNames.length > 0 && <span className="mono tr-fx"> · {fxNames.join(', ')}</span>}
                   </span>
+                )}
+                {fadeIn > 0 && visFrom === it.start && <span className="tr-bevel in" style={{ width: Math.min(width, fadeIn * view.pps) }} />}
+                {fadeOut > 0 && visTo === end && <span className="tr-bevel out" style={{ width: Math.min(width, fadeOut * view.pps) }} />}
+                {onVideoTrack && !isSubs && (
+                  <KeyStrip
+                    item={it}
+                    view={view}
+                    from={visFrom}
+                    width={Math.round(width)}
+                    selRel={selKey && selKey.id === it.id ? selKey.rel : null}
+                    onDown={(e, rel) => startKey(e, it, rel)}
+                    onMenu={(e, rel) => openMenu(e, (x, _t, y) => ({ kind: 'key', x, y, itemId: it.id, rel }), it)}
+                  />
                 )}
                 {!locked && !isFreeze && visFrom === it.start && <span className="tr-edge l" onPointerDown={(e) => startItem(e, it, 'start')} />}
                 {!locked && visTo === end && <span className="tr-edge r" onPointerDown={(e) => startItem(e, it, 'end')} />}

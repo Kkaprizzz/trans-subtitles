@@ -1,7 +1,8 @@
 /**
- * Модель проекта монтажки (формат v10).
+ * Модель проекта монтажки (формат v11).
  * Надпись — кусок вида 'text' на видеодорожке: mediaId пустой, in = 0, out = длина, параметры в plate.
- * Кадр куска (frame): масштаб, положение и кроп картинки; эффекты (effects) — список с параметрами.
+ * Кадр куска (frame): масштаб, положение, кроп и прозрачность картинки; эффекты (effects) — список с параметрами, среди них
+ * готовые анимации (появление, зум, выезд…). Ключевые кадры (keys): положение, масштаб, прозрачность по времени куска (anim.ts).
  * Стоп-кадр — кусок вида 'freeze': in — секунда файла, кадр которой показывается, out = in + длина; звука у него нет.
  * Скорость куска (speed, 0.25–4): на таймлайне он занимает (out − in) ÷ speed секунд; in/out — всегда секунды файла. Чистые функции: каждая операция возвращает новый проект (для отмены/повтора).
  *
@@ -15,7 +16,8 @@
  * поэтому едут за видео; где они стоят на таймлайне, считает cut.ts.
  */
 import { cleanPoints, splitGain, type GainPoint } from './audio.ts'
-import { cleanEffects, type Effect } from './effects.ts'
+import { clampKeys, cleanKeys, KEY_PROPS, noKeys, shiftKeys, sliceEffects, splitKeys, type Keys } from './anim.ts'
+import { cleanEffects, isAnimType, type Effect } from './effects.ts'
 import { FONTS } from './fonts.ts'
 import { cleanFrame, DEFAULT_FRAME, type Frame } from './frame.ts'
 import { cleanPlate, type Plate } from './plate.ts'
@@ -76,8 +78,10 @@ export interface Item {
   gain: GainPoint[]
   /** эффекты картинки (блюр…), действуют на весь кусок */
   effects: Effect[]
-  /** масштаб, положение и кроп картинки в кадре проекта */
+  /** масштаб, положение, кроп и прозрачность картинки в кадре проекта */
   frame: Frame
+  /** ключевые кадры положения, масштаба и прозрачности (время — секунды таймлайна от начала куска) */
+  keys: Keys
   /** для kind 'text': параметры надписи; у остальных null */
   plate: Plate | null
   /** для kind 'subs': id видеокуска, за которым едут субтитры; null — живут сами */
@@ -131,7 +135,7 @@ export interface Canvas {
 }
 
 export interface Project {
-  version: 10
+  version: 11
   id: string
   name: string
   createdAt: string
@@ -179,7 +183,7 @@ const newTrack = (kind: TrackKind): Track => ({ id: uid('t'), kind, muted: false
 
 export function newProject(name: string, now = new Date().toISOString()): Project {
   return {
-    version: 10,
+    version: 11,
     id: uid('p'),
     name,
     createdAt: now,
@@ -278,12 +282,32 @@ export function placeFree(p: Project, kind: TrackKind, start: number, end: numbe
   return addTrackOf(p, kind)
 }
 
+/** Ключи не выходят за длину своего куска: лишние убираются, на краю остаётся ключ с тем же значением линии. */
+function fitKeys(p: Project): Project {
+  let changed = false
+  const items = p.items.map((it) => {
+    const len = itemDur(it)
+    let keys = it.keys
+    for (const k of KEY_PROPS) {
+      const c = clampKeys(it.keys[k], len)
+      if (c !== it.keys[k]) {
+        if (keys === it.keys) keys = { ...it.keys }
+        keys[k] = c
+      }
+    }
+    if (keys === it.keys) return it
+    changed = true
+    return { ...it, keys }
+  })
+  return changed ? { ...p, items } : p
+}
+
 /**
  * Приводит проект в порядок после любой правки: видеодорожки над звуковыми, а связанные субтитры
  * повторяют границы своего видео (нет видео — нет и субтитров). Если на дорожке субтитров стало тесно, они переезжают.
  */
 export function finish(p0: Project): Project {
-  let p = normalizeTracks(p0)
+  let p = normalizeTracks(fitKeys(p0))
   const byId = new Map(p.items.map((i) => [i.id, i]))
   const stale: Item[] = []
   const dropped = new Set<string>()
@@ -331,7 +355,7 @@ export function insertMedia(p: Project, mediaId: string, at: number, trackId?: s
   const m = mediaOf(p, mediaId)
   if (!m || m.duration < MIN_ITEM) return { p, id: '' }
   const kind: TrackKind = m.hasVideo ? 'video' : 'audio'
-  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, plate: null, link: null }
+  const it: Item = { id: uid('i'), kind: 'media', mediaId, trackId: '', start: Math.max(0, r3(at)), in: 0, out: r3(m.duration), audio: m.hasAudio, speed: 1, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, link: null }
   const end = it.start + m.duration
   let placed: { p: Project; id: string }
   if (trackId === NEW_TRACK) placed = addTrackOf(p, kind)
@@ -385,7 +409,7 @@ export function trimItem(p: Project, id: string, edge: 'start' | 'end', t: numbe
       const prev = neighbors.filter((x) => itemEnd(x) <= it.start + 1e-6).pop()
       const lo = prev ? itemEnd(prev) : 0
       const nt = Math.min(itemEnd(it) - MIN_ITEM, Math.max(lo, t))
-      next = { ...it, start: r3(nt), out: r3(itemEnd(it) - nt) }
+      next = { ...it, start: r3(nt), out: r3(itemEnd(it) - nt), keys: shiftAll(it.keys, nt - it.start) }
     } else {
       const nxt = neighbors.find((x) => x.start >= itemEnd(it) - 1e-6)
       const nt = Math.min(nxt ? nxt.start : Infinity, 3600 + it.start, Math.max(it.start + MIN_ITEM, t))
@@ -399,7 +423,7 @@ export function trimItem(p: Project, id: string, edge: 'start' | 'end', t: numbe
     if (prev) lo = Math.max(lo, itemEnd(prev))
     const hi = itemEnd(it) - MIN_ITEM
     const nt = Math.min(hi, Math.max(lo, t))
-    next = { ...it, in: r3(tlToSrc(it, nt)), start: r3(nt) }
+    next = { ...it, in: r3(tlToSrc(it, nt)), start: r3(nt), keys: shiftAll(it.keys, nt - it.start) }
   } else {
     let hi = it.start + (dur - it.in) / it.speed
     const nxt = neighbors.find((x) => x.start >= itemEnd(it) - 1e-6)
@@ -410,6 +434,18 @@ export function trimItem(p: Project, id: string, edge: 'start' | 'end', t: numbe
   return finish({ ...p, items: p.items.map((x) => (x.id === id ? next : x)) })
 }
 
+/** Сдвиг всех линий ключей при подрезке левого края на delta секунд. */
+export function shiftAll(keys: Keys, delta: number): Keys {
+  const out = noKeys()
+  for (const k of KEY_PROPS) out[k] = shiftKeys(keys[k], delta)
+  return out
+}
+
+/** Эффекты половин при резке в точке c (секунды от начала куска длиной len): анимации продолжаются без скачка, ненужные уходят. */
+function splitEffects(effects: Effect[], len: number, c: number): { left: Effect[]; right: Effect[] } {
+  return { left: sliceEffects(effects, len, 0, c), right: sliceEffects(effects, len, c, len) }
+}
+
 /** Разрезает кусок в точке t таймлайна; правая часть получает новый id. Связанные субтитры режутся вместе с видео. */
 export function splitItem(p: Project, id: string, t: number): { p: Project; id: string } {
   const it0 = p.items.find((i) => i.id === id)
@@ -418,19 +454,25 @@ export function splitItem(p: Project, id: string, t: number): { p: Project; id: 
   const cut = r3(tlToSrc(it, t))
   // надпись делится по длине: параметры те же у обеих половин
   if (it.kind === 'text') {
-    const l: Item = { ...it, out: r3(t - it.start) }
-    const r: Item = { ...it, id: uid('i'), start: r3(t), out: r3(itemEnd(it) - t) }
+    const k = splitKeys(it.keys, t - it.start)
+    const fx = splitEffects(it.effects, itemDur(it), t - it.start)
+    const l: Item = { ...it, out: r3(t - it.start), keys: k.left, effects: fx.left }
+    const r: Item = { ...it, id: uid('i'), start: r3(t), out: r3(itemEnd(it) - t), keys: k.right, effects: fx.right }
     return { p: finish({ ...p, items: [...p.items.filter((x) => x.id !== id), l, r] }), id: r.id }
   }
   // стоп-кадр делится по длине: кадр (in) у обеих половин тот же
   if (it.kind === 'freeze') {
-    const l: Item = { ...it, out: r3(it.in + (t - it.start)) }
-    const r: Item = { ...it, id: uid('i'), start: r3(t), out: r3(it.in + (itemEnd(it) - t)) }
+    const k = splitKeys(it.keys, t - it.start)
+    const fx = splitEffects(it.effects, itemDur(it), t - it.start)
+    const l: Item = { ...it, out: r3(it.in + (t - it.start)), keys: k.left, effects: fx.left }
+    const r: Item = { ...it, id: uid('i'), start: r3(t), out: r3(it.in + (itemEnd(it) - t)), keys: k.right, effects: fx.right }
     return { p: finish({ ...p, items: [...p.items.filter((x) => x.id !== id), l, r] }), id: r.id }
   }
   const g = splitGain(it.gain, it.volume, cut)
-  const left: Item = { ...it, out: cut, gain: g.left }
-  const right: Item = { ...it, id: uid('i'), start: r3(t), in: cut, gain: g.right }
+  const k = splitKeys(it.keys, t - it.start)
+  const fx = splitEffects(it.effects, itemDur(it), t - it.start)
+  const left: Item = { ...it, out: cut, gain: g.left, keys: k.left, effects: fx.left }
+  const right: Item = { ...it, id: uid('i'), start: r3(t), in: cut, gain: g.right, keys: k.right, effects: fx.right }
   // правая половина субтитров, связанных с этим видео, привязывается к правой половине видео
   const rightSubs: Item[] =
     it.kind === 'media'
@@ -503,7 +545,7 @@ export function addSubtitles(p: Project, itemIds: string[]): Project {
     if (subsOf(next, v.id).length > 0) continue
     const top = videoTracks(next).find((t) => !t.locked)
     const placed = placeFree(next, 'video', v.start, itemEnd(v), top?.id)
-    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, plate: null, link: v.id }
+    const s: Item = { id: uid('i'), kind: 'subs', mediaId: v.mediaId, trackId: placed.id, start: v.start, in: v.in, out: v.out, audio: false, speed: v.speed, volume: 1, gain: [], effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys(), plate: null, link: v.id }
     next = { ...placed.p, items: [...placed.p.items, s] }
   }
   return finish(next)
@@ -824,7 +866,7 @@ export function sanitizeProject(raw: unknown): Project | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   const ver = typeof r.version === 'number' ? r.version : 0
-  if (ver < 3 || ver > 10) return null
+  if (ver < 3 || ver > 11) return null
   const media: MediaRef[] = Array.isArray(r.media)
     ? (r.media as Array<Record<string, unknown>>)
         .filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string' && num(m.duration, 0) > 0)
@@ -874,8 +916,10 @@ export function sanitizeProject(raw: unknown): Project | null {
             out: kind === 'text' ? Math.min(3600, num(i.out, 0)) : num(i.out, 0),
             // до v6 звук всегда играл вместе с видео; у субтитров звука нет
             audio: kind === 'media' && !!media?.hasAudio && i.audio !== false,
-            effects: kind === 'subs' || kind === 'text' ? [] : cleanEffects(i.effects),
-            frame: kind === 'subs' || kind === 'text' ? { ...DEFAULT_FRAME } : cleanFrame(i.frame),
+            // у надписи — только анимации (без блюра и цвета) и «Кадр» без кропа
+            effects: kind === 'subs' ? [] : kind === 'text' ? cleanEffects(i.effects).filter((e) => isAnimType(e.type)) : cleanEffects(i.effects),
+            frame: kind === 'subs' ? { ...DEFAULT_FRAME } : kind === 'text' ? { ...cleanFrame(i.frame), cl: 0, cr: 0, ct: 0, cb: 0 } : cleanFrame(i.frame),
+            keys: kind === 'subs' ? noKeys() : cleanKeys(i.keys),
             plate: kind === 'text' ? cleanPlate(i.plate, FONTS.map((f) => f.id)) : null,
             speed: kind === 'media' ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, num(i.speed, 1))) : 1,
             volume: Math.min(1, Math.max(0, num(i.volume, 1))),
@@ -928,7 +972,7 @@ export function sanitizeProject(raw: unknown): Project | null {
       ? { w: even((r.canvas as Canvas).w), h: even((r.canvas as Canvas).h) }
       : null
   let p: Project = {
-    version: 10,
+    version: 11,
     id: str(r.id) || uid('p'),
     name: str(r.name, 'Проект').slice(0, 120) || 'Проект',
     createdAt: str(r.createdAt),

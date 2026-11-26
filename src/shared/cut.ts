@@ -3,6 +3,8 @@
  * поэтому едет за видео; где она стоит на таймлайне, считает placement. Для экспорта проект обрезается под рамку
  * (cropProject), и дальше работает обычный экспорт таймлайна.
  */
+import { shiftAll } from './project.ts'
+import { sliceEffects } from './anim.ts'
 import { itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
 import type { ClipCandidate } from './clips.ts'
 import type { SubtitleStyle } from './timeline.ts'
@@ -227,8 +229,12 @@ export function cropProject(p: Project, a: number, b: number): Project {
     const s = Math.max(it.start, a)
     const e = Math.min(end, b)
     if (e - s < MIN_ITEM / 2) continue
-    if (it.kind === 'freeze' || it.kind === 'text') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)) })
-    else items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)) })
+    // ключи и анимации едут вместе с куском: подрезка слева сдвигает ключи (finish оставит ключи в пределах длины)
+    const keys = shiftAll(it.keys, s - it.start)
+    // анимации продолжаются так, будто кусок не резали: до рамки они «уже прошли», после неё «ещё не начались»
+    const effects = sliceEffects(it.effects, end - it.start, s - it.start, e - it.start)
+    if (it.kind === 'freeze' || it.kind === 'text') items.push({ ...it, start: r3(s - a), out: r3(it.in + (e - s)), keys, effects })
+    else items.push({ ...it, start: r3(s - a), in: r3(tlToSrc(it, s)), out: r3(tlToSrc(it, e)), keys, effects })
   }
   return { ...p, items, markers: [], clips: [] }
 }

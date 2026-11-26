@@ -7,12 +7,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { fontFamilyOf } from '../../../shared/fonts'
 import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
+import { animAt, isAnimated, propAt, type Anim } from '../../../shared/anim'
 import { gainAt } from '../../../shared/audio'
 import { cssFilter } from '../../../shared/effects'
 import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
-import type { Plate } from '../../../shared/plate'
 import { fillPlate, loadPlateFont } from '../plateDom'
-import { activeAt, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
+import { activeAt, itemDur, itemEnd, itemTrackKind, mediaOf, sourceTime, type Framing, type Item, type Project, type SubLayer, type TlWord } from '../../../shared/project'
 import { buildPhrases, captionAt, DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../../../shared/timeline'
 import { createCaptionView, setupStage, type CaptionView } from '../caption'
 import EditPop from '../EditPop'
@@ -42,7 +42,16 @@ interface Props {
   onFrameDrag?(id: string, patch: Partial<Frame>): void
   /** выделенная надпись: её можно таскать мышью в превью */
   plateItemId?: string | null
-  onPlateDrag?(id: string, patch: Partial<Plate>): void
+  /** надпись потянули мышью: сдвиг в % кадра и значения в начале движения (положение плашки и ключевые значения сдвига) */
+  onPlateMove?(id: string, dx: number, dy: number, start: PlateStart): void
+}
+
+/** Значения в момент, когда надпись схватили: положение плашки (px, py) и сдвиг по ключам/«Кадру» (x, y). */
+export interface PlateStart {
+  px: number
+  py: number
+  x: number
+  y: number
 }
 
 /** z-index слоя по положению дорожки: выше дорожка — выше слой. */
@@ -97,12 +106,12 @@ function CaptionLayer(p: CaptionLayerProps): React.JSX.Element {
   return <div className="pl-captions" ref={hostRef} style={{ zIndex: p.z }} />
 }
 
-/** Одна надпись в кадре: рисуется тем же кодом, что и в экспорте; выделенную можно таскать. */
-function PlateView(p: { item: Item; z: number; W: number; H: number; selected: boolean; onDrag?(patch: Partial<Plate>): void }): React.JSX.Element | null {
+/** Одна надпись в кадре: рисуется тем же кодом, что и в экспорте; выделенную можно таскать. anim — сдвиг, масштаб и прозрачность в этот момент. */
+function PlateView(p: { item: Item; z: number; W: number; H: number; selected: boolean; anim: Anim; startAt: PlateStart; onMove?(dx: number, dy: number, start: PlateStart): void }): React.JSX.Element | null {
   const plate = p.item.plate
   const ref = useRef<HTMLDivElement>(null)
   const [tick, setTick] = useState(0)
-  const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null)
+  const drag = useRef<{ x: number; y: number; start: PlateStart } | null>(null)
   useEffect(() => {
     if (!plate) return
     let alive = true
@@ -115,33 +124,46 @@ function PlateView(p: { item: Item; z: number; W: number; H: number; selected: b
     const el = ref.current
     if (!el || !plate) return
     fillPlate(el, plate, p.W, p.H)
-    el.style.zIndex = String(p.z)
-    if (p.selected && p.onDrag) {
+    if (p.selected && p.onMove) {
       el.style.pointerEvents = 'auto'
       el.style.cursor = 'move'
       el.style.outline = '1.5px solid var(--accent)'
       el.style.touchAction = 'none'
     }
-  }, [plate, p.W, p.H, p.z, p.selected, tick]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [plate, p.W, p.H, p.selected, tick]) // eslint-disable-line react-hooks/exhaustive-deps
   if (!plate) return null
+  const a = p.anim
+  // обёртка во весь кадр: сдвиг в % кадра, масштаб от центра блока, прозрачность — те же значения, что считает экспорт
+  const moving = a.x !== 0 || a.y !== 0 || a.scale !== 1
   return (
     <div
-      ref={ref}
-      className="pl-plate"
-      onPointerDown={(e) => {
-        if (!p.selected || !p.onDrag || e.button !== 0) return
-        e.stopPropagation()
-        ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
-        drag.current = { x: e.clientX, y: e.clientY, px: plate.x, py: plate.y }
+      className="pl-anim"
+      style={{
+        zIndex: p.z,
+        transformOrigin: `${plate.x}% ${plate.y}%`,
+        transform: moving ? `translate(${a.x}%, ${a.y}%) scale(${a.scale})` : undefined,
+        opacity: a.opacity < 1 ? a.opacity : undefined
       }}
-      onPointerMove={(e) => {
-        const d = drag.current
-        if (!d || !p.onDrag) return
-        p.onDrag({ x: d.px + ((e.clientX - d.x) / p.W) * 100, y: d.py + ((e.clientY - d.y) / p.H) * 100 })
-      }}
-      onPointerUp={() => (drag.current = null)}
-      onPointerCancel={() => (drag.current = null)}
-    />
+    >
+      <div
+        ref={ref}
+        className="pl-plate"
+        onPointerDown={(e) => {
+          if (!p.selected || !p.onMove || e.button !== 0) return
+          e.stopPropagation()
+          ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
+          drag.current = { x: e.clientX, y: e.clientY, start: p.startAt }
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current
+          if (!d || !p.onMove) return
+          // курсор движется по экрану, а блок — в его же масштабе: переводим пиксели в % кадра
+          p.onMove(((e.clientX - d.x) / p.W) * 100, ((e.clientY - d.y) / p.H) * 100, d.start)
+        }}
+        onPointerUp={() => (drag.current = null)}
+        onPointerCancel={() => (drag.current = null)}
+      />
+    </div>
   )
 }
 
@@ -251,19 +273,24 @@ export default function Player(p: Props): React.JSX.Element {
         el.style.objectPosition = framed && cv.mode === 'crop' ? `${cv.offsetX * 100}% 50%` : '50% 50%'
         // эффекты куска (блюр — в долях высоты кадра, как в экспорте)
         el.style.filter = cssFilter(it.effects, frameH)
-        // кадр куска: кроп режет края вписанной картинки (clip-path в px элемента), масштаб и положение — от центра кадра
+        // кадр куска: кроп режет края вписанной картинки (clip-path в px элемента); положение, масштаб и прозрачность — по времени
+        // куска (ключи и анимации, одна функция с экспортом), от центра кадра
         const fr = it.frame
-        if (isDefaultFrame(fr)) {
+        const a = animAt(it, itemDur(it), Math.min(itemDur(it), Math.max(0, t - it.start)))
+        const still = isDefaultFrame(fr) && !isAnimated(it)
+        if (still) {
           el.style.transform = ''
           el.style.clipPath = ''
+          el.style.opacity = ''
         } else {
           const fit = framed ? { w: frameW, h: frameH } : fitSize(m.width ?? 0, m.height ?? 0, frameW, frameH)
           const l = (frameW - fit.w) / 2 + (fit.w * fr.cl) / 100
           const r = (frameW - fit.w) / 2 + (fit.w * fr.cr) / 100
-          const t = (frameH - fit.h) / 2 + (fit.h * fr.ct) / 100
+          const tp = (frameH - fit.h) / 2 + (fit.h * fr.ct) / 100
           const b = (frameH - fit.h) / 2 + (fit.h * fr.cb) / 100
-          el.style.clipPath = fr.cl || fr.cr || fr.ct || fr.cb ? `inset(${t.toFixed(1)}px ${r.toFixed(1)}px ${b.toFixed(1)}px ${l.toFixed(1)}px)` : ''
-          el.style.transform = `translate(${fr.x}%, ${fr.y}%) scale(${fr.scale / 100})`
+          el.style.clipPath = fr.cl || fr.cr || fr.ct || fr.cb ? `inset(${tp.toFixed(1)}px ${r.toFixed(1)}px ${b.toFixed(1)}px ${l.toFixed(1)}px)` : ''
+          el.style.transform = `translate(${a.x}%, ${a.y}%) scale(${a.scale})`
+          el.style.opacity = a.opacity < 1 ? String(a.opacity) : ''
         }
       }
       // скорость куска; тон сохраняется (preservesPitch по умолчанию включён)
@@ -348,9 +375,12 @@ export default function Player(p: Props): React.JSX.Element {
   // рамка выделенного куска в предпросмотре: тянуть внутри — положение, за угол — масштаб (пропорционально)
   const selItem = !cv && p.frameItemId ? p.project.items.find((i) => i.id === p.frameItemId && p.time >= i.start && p.time < itemEnd(i)) : undefined
   const selMedia = selItem ? mediaOf(p.project, selItem.mediaId) : undefined
+  // рамка идёт за картинкой: положение и масштаб — с учётом ключей и анимаций в этот момент
+  const selAnim = selItem ? animAt(selItem, itemDur(selItem), Math.min(itemDur(selItem), Math.max(0, p.time - selItem.start))) : null
+  const selFrame: Frame | null = selItem && selAnim ? { ...selItem.frame, x: selAnim.x, y: selAnim.y, scale: selAnim.scale * 100 } : null
   const selBox = (() => {
-    if (!selItem || !selMedia || frameW <= 0) return null
-    const r = frameRect(selItem.frame, selMedia.width ?? 0, selMedia.height ?? 0, frameW, frameH)
+    if (!selItem || !selMedia || !selFrame || frameW <= 0) return null
+    const r = frameRect(selFrame, selMedia.width ?? 0, selMedia.height ?? 0, frameW, frameH)
     const fr = selItem.frame
     return { x: r.x + (r.w * fr.cl) / 100, y: r.y + (r.h * fr.ct) / 100, w: r.w * (1 - (fr.cl + fr.cr) / 100), h: r.h * (1 - (fr.ct + fr.cb) / 100) }
   })()
@@ -361,10 +391,13 @@ export default function Player(p: Props): React.JSX.Element {
     ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
     const fr0 = frameRef.current?.getBoundingClientRect()
     if (!fr0) return
-    const rect = frameRect(selItem.frame, selMedia?.width ?? 0, selMedia?.height ?? 0, frameW, frameH)
+    const rect = frameRect(selFrame ?? selItem.frame, selMedia?.width ?? 0, selMedia?.height ?? 0, frameW, frameH)
     const cx = fr0.left + rect.x + rect.w / 2
     const cy = fr0.top + rect.y + rect.h / 2
-    dragRef.current = { mode, x: e.clientX, y: e.clientY, frame: selItem.frame, cx, cy, r0: Math.max(8, Math.hypot(e.clientX - cx, e.clientY - cy)) }
+    // правка идёт от значения по ключам (без готовых анимаций): так ключ получает ровно то, что потянули
+    const rel = Math.min(itemDur(selItem), Math.max(0, p.time - selItem.start))
+    const start: Frame = { ...selItem.frame, x: propAt(selItem, 'x', rel), y: propAt(selItem, 'y', rel), scale: propAt(selItem, 'scale', rel) }
+    dragRef.current = { mode, x: e.clientX, y: e.clientY, frame: start, cx, cy, r0: Math.max(8, Math.hypot(e.clientX - cx, e.clientY - cy)) }
   }
   const onFramePointerMove = (e: React.PointerEvent): void => {
     const d = dragRef.current
@@ -405,17 +438,22 @@ export default function Player(p: Props): React.JSX.Element {
         {cv?.mode === 'fit-blur' && <canvas ref={bgRef} className="pl-bg" width={54} height={96} />}
         {activeAt(p.project, p.time)
           .filter((i) => i.kind === 'text' && !hidden.has(i.trackId))
-          .map((i) => (
-            <PlateView
-              key={i.id}
-              item={i}
-              z={layerZ(trackOrder.get(i.trackId) ?? 0)}
-              W={frameW}
-              H={frameH}
-              selected={p.plateItemId === i.id}
-              onDrag={p.onPlateDrag ? (patch) => p.onPlateDrag?.(i.id, patch) : undefined}
-            />
-          ))}
+          .map((i) => {
+            const rel = Math.min(itemDur(i), Math.max(0, p.time - i.start))
+            return (
+              <PlateView
+                key={i.id}
+                item={i}
+                z={layerZ(trackOrder.get(i.trackId) ?? 0)}
+                W={frameW}
+                H={frameH}
+                selected={p.plateItemId === i.id}
+                anim={animAt(i, itemDur(i), rel)}
+                startAt={{ px: i.plate?.x ?? 50, py: i.plate?.y ?? 50, x: propAt(i, 'x', rel), y: propAt(i, 'y', rel) }}
+                onMove={p.onPlateMove ? (dx, dy, start) => p.onPlateMove?.(i.id, dx, dy, start) : undefined}
+              />
+            )
+          })}
         {selBox && p.onFrameDrag && (
           <div
             className="pl-sel"

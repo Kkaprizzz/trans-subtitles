@@ -7,9 +7,10 @@
  * они встают в тот же порядок слоёв, что и видео. Звук: все куски со звуком (кроме заглушённых дорожек)
  * задерживаются на свой start и сводятся без нормализации.
  */
+import { animExpr, isAnimated, type Expr } from './anim.ts'
 import { gainExpr, gainPeak } from './audio.ts'
 import { effectFilters } from './effects.ts'
-import { fitSize, frameFilters } from './frame.ts'
+import { fitSize, frameFilters, isDefaultFrame } from './frame.ts'
 import { framingChain } from './cut.ts'
 import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
@@ -33,6 +34,8 @@ export interface FramingOpt {
 
 /** Готовая картинка надписи (PNG на весь кадр) и её время на таймлайне. */
 export interface TextLayerInput {
+  /** кусок-надпись: из него берутся «Кадр», ключи и анимации (положение, масштаб, прозрачность) */
+  itemId?: string
   trackId: string
   path: string
   start: number
@@ -97,6 +100,34 @@ export function tempoFilter(speed: number): string {
 }
 
 const f3 = (x: number): string => (Math.round(x * 1000) / 1000).toFixed(3)
+
+/** Число или выражение ffmpeg одной строкой. */
+const exprStr = (e: Expr): string => (e.e !== undefined ? e.e : String(Math.round(e.c * 1e6) / 1e6))
+
+/** Нужна ли прозрачность: не 100% или меняется по времени. */
+const needsOpacity = (e: Expr): boolean => e.e !== undefined || e.c < 1 - 1e-6
+
+/**
+ * Прозрачность куска: значение (0..1) — число или выражение от T (время таймлайна). Маленький серый ролик 64×64 с яркостью
+ * 255·значение растягивается до размера картинки и становится её альфой (у картинок со своей прозрачностью — умножается
+ * на неё). Считать выражение на каждый пиксель не приходится, поэтому это быстро.
+ * from — метка картинки (размер уже окончательный до масштаба), to — метка результата.
+ */
+function opacityStage(graph: string[], from: string, to: string, tag: string, op: Expr, fps: number, until: number, hasAlpha: boolean): void {
+  graph.push(
+    `[${from}]format=${hasAlpha ? 'rgba' : 'yuva420p'}[pa${tag}]`,
+    `color=c=white:s=64x64:r=${fps}:d=${f3(until)},format=gray,geq=lum='255*(${exprStr(op)})'[mk${tag}]`,
+    `[mk${tag}][pa${tag}]scale2ref=w=iw:h=ih[ms${tag}][ps${tag}]`
+  )
+  if (hasAlpha) {
+    graph.push(
+      `[ps${tag}]split[pb${tag}][pc${tag}]`,
+      `[pc${tag}]alphaextract[ax${tag}]`,
+      `[ax${tag}][ms${tag}]blend=all_mode=multiply[am${tag}]`,
+      `[pb${tag}][am${tag}]alphamerge[${to}]`
+    )
+  } else graph.push(`[ps${tag}][ms${tag}]alphamerge[${to}]`)
+}
 const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
 const CRF: Record<ExportQuality, number> = { high: 16, medium: 20, small: 25 }
 
@@ -146,16 +177,38 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const fx = effectFilters(it.effects, H)
           // размер вписанной картинки в кадре (для кропа и положения); у кадрированного клипа картинка занимает весь кадр
           const fit = framed ? { w: W, h: H } : fitSize(m.width ?? 0, m.height ?? 0, W, H)
-          const ff = frameFilters(it.frame, fit.w, fit.h)
-          // цепочка: вписывание/кадрирование → эффекты → кроп и масштаб → наложение (положение от центра кадра)
-          const post = [...fx, ...(ff ? ff.chain : [])]
-          const vOut = post.length ? `f${k}` : `v${k}`
+          // анимация: положение и масштаб — выражения от t (одни и те же формулы, что в превью), прозрачность — маска
+          const len = itemDur(it)
+          const ex = animExpr(it, len, it.start, 't')
+          const moving = ex.x.e !== undefined || ex.y.e !== undefined || ex.scale.e !== undefined
+          const op = animExpr(it, len, it.start, 'T').opacity
+          const ff = frameFilters(it.frame, fit.w, fit.h, moving ? ex : undefined)
+          // цепочка: вписывание/кадрирование → эффекты → кроп → прозрачность → масштаб → наложение (положение от центра кадра)
+          const pre = [...fx, ...(ff ? ff.crop : [])]
+          const opaque = needsOpacity(op)
+          const hasAlpha = !!m.hasAlpha
+          const scaleSteps = ff ? ff.scale : []
+          // без прозрачности вся цепочка идёт одним куском (как раньше); с ней масштаб переносится после маски
+          const first = opaque ? pre : [...pre, ...scaleSteps]
+          const tail = opaque ? scaleSteps : []
+          const vOut = first.length || opaque ? `f${k}` : `v${k}`
           if (framed && o.framing) {
             graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k)))
           } else {
             graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${timing}[${vOut}]`)
           }
-          if (post.length) graph.push(`[${vOut}]${post.join(',')}[v${k}]`)
+          let cur = vOut
+          if (first.length) {
+            const nx = opaque ? `g${k}` : `v${k}`
+            graph.push(`[${cur}]${first.join(',')}[${nx}]`)
+            cur = nx
+          }
+          if (opaque) {
+            const nx = tail.length ? `h${k}` : `v${k}`
+            opacityStage(graph, cur, nx, String(k), op, o.fps, itemEnd(it) + 1, hasAlpha)
+            cur = nx
+          }
+          if (tail.length) graph.push(`[${cur}]${tail.join(',')}[v${k}]`)
           const pos = ff ? `x='${ff.x}':y='${ff.y}'` : 'x=(W-w)/2:y=(H-h)/2'
           graph.push(`[${last}][v${k}]overlay=${pos}:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
           last = `o${k}`
@@ -188,21 +241,43 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
       }
     })
   }
-  // надписи: готовые картинки на всё время куска, слой по высоте дорожки
+  // надписи: готовые картинки на всё время куска, слой по высоте дорожки. Сдвиг, масштаб (от центра блока) и прозрачность
+  // берутся у куска-надписи, если они заданы или меняются по времени
   for (const tl of o.textLayers ?? []) {
     if (hidden.has(tl.trackId)) continue
     const k = inputCount++
     inputs.push('-loop', '1', '-framerate', String(o.fps), '-t', f3(tl.end - tl.start), '-i', tl.path)
     const s = f3(tl.start)
     const e = f3(tl.end)
+    const it = tl.itemId ? p.items.find((x) => x.id === tl.itemId) : undefined
     layers.push({
       z: trackIdx.get(tl.trackId) ?? 0,
       sort: tl.start,
       apply: () => {
-        graph.push(
-          `[${k}:v]format=rgba,setpts=PTS-STARTPTS+${s}/TB[x${k}]`,
-          `[${last}][x${k}]overlay=x=0:y=0:format=auto:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`
-        )
+        graph.push(`[${k}:v]format=rgba,setpts=PTS-STARTPTS+${s}/TB[x${k}]`)
+        let cur = `x${k}`
+        let pos = 'x=0:y=0'
+        if (it && it.plate && (isAnimated(it) || !isDefaultFrame(it.frame))) {
+          const len = itemDur(it)
+          const ex = animExpr(it, len, it.start, 't')
+          const op = animExpr(it, len, it.start, 'T').opacity
+          if (needsOpacity(op)) {
+            opacityStage(graph, cur, `xo${k}`, `x${k}`, op, o.fps, tl.end + 1, true)
+            cur = `xo${k}`
+          }
+          const S = ex.scale.e !== undefined ? `(${ex.scale.e})` : String(Math.round(ex.scale.c * 1e6) / 1e6)
+          if (ex.scale.e !== undefined || Math.abs(ex.scale.c - 1) > 1e-6) {
+            graph.push(`[${cur}]scale=w='max(2,trunc(iw*${S}))':h='max(2,trunc(ih*${S}))'${ex.scale.e !== undefined ? ':eval=frame' : ''}[xs${k}]`)
+            cur = `xs${k}`
+          }
+          // слой во весь кадр, масштаб от центра блока (px, py — его доли кадра): левый верхний угол = центр·(1−масштаб) + сдвиг
+          const px = (it.plate.x / 100).toFixed(4)
+          const py = (it.plate.y / 100).toFixed(4)
+          const dx = ex.x.e !== undefined ? `(${ex.x.e})/100` : String((ex.x.c ?? 0) / 100)
+          const dy = ex.y.e !== undefined ? `(${ex.y.e})/100` : String((ex.y.c ?? 0) / 100)
+          pos = `x='W*${px}*(1-${S})+W*${dx}':y='H*${py}*(1-${S})+H*${dy}'`
+        }
+        graph.push(`[${last}][${cur}]overlay=${pos}:format=auto:eof_action=pass:enable='between(t,${s},${e})'[o${k}]`)
         last = `o${k}`
       }
     })

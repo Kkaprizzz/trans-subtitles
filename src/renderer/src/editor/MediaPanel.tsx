@@ -1,6 +1,6 @@
 /** Панель «Медиа»: файлы проекта с миниатюрами. Тащи на таймлайн или дважды щёлкни — в конец основной дорожки. */
 import { memo } from 'react'
-import { EFFECT_MIME, EFFECT_TYPES, EFFECTS, type EffectType } from '../../../shared/effects'
+import { ANIM_TYPES, EFFECT_MIME, EFFECTS, FILTER_TYPES, type EffectType } from '../../../shared/effects'
 import { PLATE_STYLES } from '../../../shared/plate'
 import type { MediaRef } from '../../../shared/project'
 import { fmtTime } from '../format'
@@ -68,27 +68,37 @@ function MediaPanel(p: Props): React.JSX.Element {
         </ul>
       )}
       {p.tab === 'fx' && (
-        <ul className="fx-list">
-          {EFFECT_TYPES.map((t) => (
-            <li
-              key={t}
-              className="fx-card"
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(EFFECT_MIME, t)
-                e.dataTransfer.effectAllowed = 'copy'
-              }}
-              onClick={() => p.onEffect(t)}
-              title="Щёлкни — наложить на выделенные куски, или перетащи на кусок"
-            >
-              <span className={`fx-swatch ${t}`} />
-              <span className="fx-meta">
-                <span className="fx-name">{EFFECTS[t].title}</span>
-                <span className="dim">{EFFECTS[t].description}</span>
-              </span>
-            </li>
+        <>
+          {[
+            { title: 'Фильтры', types: FILTER_TYPES },
+            { title: 'Анимации', types: ANIM_TYPES }
+          ].map((g) => (
+            <div key={g.title}>
+              <div className="fx-group">{g.title}</div>
+              <ul className="fx-list">
+                {g.types.map((t) => (
+                  <li
+                    key={t}
+                    className="fx-card"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData(EFFECT_MIME, t)
+                      e.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onClick={() => p.onEffect(t)}
+                    title="Щёлкни — наложить на выделенные куски, или перетащи на кусок"
+                  >
+                    <span className={`fx-swatch ${t}`} />
+                    <span className="fx-meta">
+                      <span className="fx-name">{EFFECTS[t].title}</span>
+                      <span className="dim">{EFFECTS[t].description}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
-        </ul>
+        </>
       )}
       <ul className="media-list" hidden={p.tab !== 'media'}>
         {p.media.length === 0 && <li className="empty">Добавь видео или звук: «+ Импорт» или перетащи файлы в окно</li>}

@@ -4,7 +4,8 @@
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { fmtTime } from '../format'
-import { addEffect, canHaveEffects, copyItems, duplicateItems, insertFreeze, insertText, joinSelected, pasteItems, patchFrame, patchPlate, type ClipEntry } from '../../../shared/mix'
+import { addEffect, copyItems, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, pasteItems, patchPlate, setPropAt, type ClipEntry } from '../../../shared/mix'
+import { hasKeys } from '../../../shared/anim'
 import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
 import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
@@ -48,7 +49,8 @@ import ClipsDialog, { type ClipsParams } from './ClipsDialog'
 import ExportDialog from './ExportDialog'
 import Inspector from './Inspector'
 import MediaPanel from './MediaPanel'
-import Player from './Player'
+import Player, { type PlateStart } from './Player'
+import type { Frame } from '../../../shared/frame'
 import Transport, { useMasterVolume } from './Transport'
 import { loadModelId, type SettingsSection } from './SettingsDialog'
 import SubsPanel, { type SubsTab } from './SubsPanel'
@@ -191,6 +193,9 @@ export default function Editor(p: Props): React.JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const [missing, setMissing] = useState<Set<string>>(new Set())
   const [time, setTime] = useState(0)
+  const timeRef = useRef(0)
+  timeRef.current = time
+  const getTime = useCallback(() => timeRef.current, [])
   const [playing, setPlaying] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
   const [previews, setPreviews] = useState<Record<string, string>>({})
@@ -308,13 +313,18 @@ export default function Editor(p: Props): React.JSX.Element {
   // у выделенного одного куска картинки (видео, оверлей, стоп-кадр) в превью рамка: тянуть — положение, угол — масштаб
   const frameItemId = useMemo(() => {
     const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
-    return it && canHaveEffects(project, it) ? it.id : null
+    return it && hasFrameCrop(project, it) ? it.id : null
   }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
   // выделенная надпись: в превью её можно таскать
   const plateItemId = useMemo(() => {
     const it = selected.length === 1 && !selectedClip ? project.items.find((i) => i.id === selected[0]) : undefined
     return it?.kind === 'text' ? it.id : null
   }, [selected, selectedClip, project]) // eslint-disable-line react-hooks/exhaustive-deps
+  // инспектору время нужно только у куска с ключами (значения полей идут за курсором); иначе не перерисовываем его на каждый кадр
+  const inspTime = useMemo(() => {
+    const it = selected.length === 1 ? project.items.find((i) => i.id === selected[0]) : undefined
+    return it && hasKeys(it.keys) ? time : -1
+  }, [selected, project, time]) // eslint-disable-line react-hooks/exhaustive-deps
   const chosenClip = selectedClip ? (project.clips.find((c) => c.id === selectedClip) ?? null) : null
   const selectedWordRef = wordSel >= 0 && tlWords[wordSel] ? { itemId: tlWords[wordSel].itemId, idx: tlWords[wordSel].idx } : null
   // панель слов и стиля: после щелчка по слову или когда выделен кусок субтитров
@@ -570,6 +580,29 @@ export default function Editor(p: Props): React.JSX.Element {
     setSelected([r.id])
     setSelectedClip(null)
   }
+  /**
+   * Потянули картинку в превью: положение и масштаб идут через setPropAt — есть ключи, ставится ключ в точке курсора,
+   * нет — меняется «Кадр».
+   */
+  const onFrameDrag = (id: string, patch: Partial<Frame>): void => {
+    let next = projectRef.current
+    for (const k of ['x', 'y', 'scale'] as const) if (patch[k] !== undefined) next = setPropAt(next, id, k, timeRef.current, patch[k] as number)
+    commit(next, `frd-${id}`)
+  }
+  /** Потянули надпись: ось с ключами двигает ключ, ось без ключей — положение самой плашки. */
+  const onPlateMove = (id: string, dx: number, dy: number, start: PlateStart): void => {
+    const pr = projectRef.current
+    const it = pr.items.find((i) => i.id === id)
+    if (!it || !it.plate) return
+    let next = pr
+    const patch: Partial<Plate> = {}
+    if (it.keys.x.length) next = setPropAt(next, id, 'x', timeRef.current, start.x + dx)
+    else patch.x = start.px + dx
+    if (it.keys.y.length) next = setPropAt(next, id, 'y', timeRef.current, start.y + dy)
+    else patch.y = start.py + dy
+    if (Object.keys(patch).length) next = patchPlate(next, id, patch)
+    commit(next, `pld-${id}`)
+  }
   /** Накладывает эффект на выделенные куски (или на один кусок, если его указали: перетащили карточку). */
   const applyEffect = (type: EffectType, itemId?: string): void => {
     const ids = itemId ? [itemId] : selected
@@ -579,7 +612,7 @@ export default function Editor(p: Props): React.JSX.Element {
     }
     const r = addEffect(projectRef.current, ids, type)
     if (r.added === 0) {
-      p.onError('Эффект уже наложен или кусок не подходит (звук и субтитры без эффектов)')
+      p.onError('Эффект уже наложен или кусок не подходит (звук и субтитры без эффектов, на надписи — только анимации)')
       return
     }
     p.onError(null)
@@ -1165,8 +1198,8 @@ export default function Editor(p: Props): React.JSX.Element {
           clipView={clipView}
           frameItemId={frameItemId}
           plateItemId={plateItemId}
-          onPlateDrag={(id, patch: Partial<Plate>) => commit(patchPlate(projectRef.current, id, patch), `pld-${id}`)}
-          onFrameDrag={(id, patch) => commit(patchFrame(projectRef.current, id, patch), `frd-${id}`)}
+          onPlateMove={onPlateMove}
+          onFrameDrag={onFrameDrag}
           onOffset={focusClip ? (v) => commit(patchClip(projectRef.current, focusClip.id, { offsetX: v }), `co-${focusClip.id}`) : undefined}
         />
         <Transport
@@ -1208,7 +1241,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onStyleReset={() => commit({ ...projectRef.current, style: null }, 'style')}
         />
       ) : (
-        <Inspector project={project} selected={selected} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} onMessage={(m) => p.onError(m)} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
+        <Inspector project={project} selected={selected} time={inspTime} getTime={getTime} onCommit={commit} onSeek={seek} onMarkerPop={setMarkerPopId} onMessage={(m) => p.onError(m)} clip={chosenClip} onFocusClip={enterFocus} onClipGone={() => setSelectedClip(null)} />
       )}
 
       <section className="ed-timeline">

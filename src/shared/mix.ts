@@ -3,7 +3,8 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { clampParam, EFFECTS, newEffect, sameEffects, type EffectType } from './effects.ts'
+import { evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKeys, propAt, setKey, type KeyProp } from './anim.ts'
+import { clampParam, EFFECTS, newEffect, type EffectType } from './effects.ts'
 import { DEFAULT_FRAME, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
 import { finish, fits, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type Project, type TrackKind } from './project.ts'
@@ -34,7 +35,8 @@ export function detachAudio(p: Project, id: string): { p: Project; id: string; e
   if (!m.hasAudio || !it.audio) return { p, id: '', error: 'У этого куска нет прикреплённого звука' }
   if (locked(p, it)) return { p, id: '', error: 'Дорожка закреплена: открепи её' }
   const placed = placeFree(p, 'audio', it.start, itemEnd(it))
-  const sound: Item = { ...it, id: uid('i'), trackId: placed.id, audio: true, link: null }
+  // у звукового куска картинки нет: эффекты, кадр и ключи остаются у видео
+  const sound: Item = { ...it, id: uid('i'), trackId: placed.id, audio: true, link: null, effects: [], frame: { ...DEFAULT_FRAME }, keys: noKeys() }
   const video: Item = { ...it, audio: false, volume: 1, gain: [] }
   return { p: finish({ ...placed.p, items: [...placed.p.items.map((x) => (x.id === id ? video : x)), sound] }), id: sound.id }
 }
@@ -62,6 +64,8 @@ export function attachAudio(p: Project, soundId: string): Result {
 
 // --- склейка ---
 
+const partOf = (it: Item): { keys: Item['keys']; frame: Item['frame']; len: number } => ({ keys: it.keys, frame: it.frame, len: itemDur(it) })
+
 /** Почему a и b склеить нельзя (null — можно). a — левый кусок, b — правый. */
 export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (a.kind !== 'media' || b.kind !== 'media') return 'Склеиваются только куски видео и звука'
@@ -72,8 +76,9 @@ export function joinProblem(p: Project, a: Item, b: Item): string | null {
   if (Math.abs(itemEnd(a) - b.start) > EPS) return 'Между кусками есть пустое место или они наехали друг на друга'
   if (a.audio !== b.audio) return 'У одного звук отделён, у другого прикреплён'
   if (Math.abs(a.speed - b.speed) > 1e-6) return 'У кусков разная скорость'
-  if (!sameEffects(a.effects, b.effects)) return 'У кусков разные эффекты'
-  if (!sameFrame(a.frame, b.frame)) return 'У кусков разный кадр (масштаб, положение или кроп)'
+  if (joinEffects(a.effects, itemDur(a), b.effects, itemDur(b)) === null) return 'У кусков разные эффекты или анимации'
+  if (!sameFrame(a.frame, b.frame)) return 'У кусков разный кадр (масштаб, положение, кроп или прозрачность)'
+  if (keysJoinGap(partOf(a), partOf(b))) return 'У кусков разные ключевые кадры на стыке'
   return null
 }
 
@@ -85,7 +90,14 @@ export function joinItems(p: Project, leftId: string, rightId: string): Result {
   const bad = joinProblem(p, a, b)
   if (bad) return { p, error: bad }
   const g = mergeGain({ points: a.gain, base: a.volume, in: a.in, out: a.out }, { points: b.gain, base: b.volume, in: b.in, out: b.out })
-  const merged: Item = { ...a, out: b.out, gain: g.points, volume: g.base }
+  const merged: Item = {
+    ...a,
+    out: b.out,
+    gain: g.points,
+    volume: g.base,
+    keys: mergeKeys(partOf(a), partOf(b)),
+    effects: joinEffects(a.effects, itemDur(a), b.effects, itemDur(b)) ?? a.effects
+  }
   const aHasSubs = subsOf(p, a.id).length > 0
   const items = p.items
     .filter((x) => x.id !== b.id)
@@ -299,6 +311,7 @@ export function insertFreeze(p: Project, id: string, t: number, len = DEFAULT_FR
     gain: [],
     effects: [],
     frame: { ...DEFAULT_FRAME },
+    keys: noKeys(),
     plate: null,
     link: null
   }
@@ -319,18 +332,25 @@ export function setFreezeLength(p: Project, id: string, len: number): Result {
 
 // --- эффекты ---
 
-/** Эффекты применимы к картинке: куски видео на видеодорожках, оверлеи и стоп-кадры (не звук и не субтитры). */
-export function canHaveEffects(p: Project, it: Item): boolean {
+/**
+ * Эффекты применимы к картинке: куски видео на видеодорожках, оверлеи и стоп-кадры (не звук и не субтитры).
+ * Надписи принимают только анимации (появление, зум, выезд…), блюр и цвет — нет. type — проверка конкретного эффекта.
+ */
+export function canHaveEffects(p: Project, it: Item, type?: EffectType): boolean {
   if (it.kind === 'subs') return false
+  if (it.kind === 'text') return !type || !!EFFECTS[type]?.anim
   return itemTrackKind(p, it) === 'video' && !!mediaOf(p, it.mediaId)?.hasVideo
 }
+
+/** Раздел «Кадр» с кропом (масштаб, положение, кроп): куски с картинкой из файла, не надписи. */
+export const hasFrameCrop = (p: Project, it: Item): boolean => it.kind !== 'text' && canHaveEffects(p, it)
 
 /** Накладывает эффект на куски (с настройками по умолчанию). Если такой эффект на куске уже есть, он остаётся как был. */
 export function addEffect(p: Project, ids: string[], type: EffectType): { p: Project; added: number } {
   if (!EFFECTS[type]) return { p, added: 0 }
   let added = 0
   const items = p.items.map((i) => {
-    if (!ids.includes(i.id) || !canHaveEffects(p, i) || i.effects.some((e) => e.type === type)) return i
+    if (!ids.includes(i.id) || !canHaveEffects(p, i, type) || i.effects.some((e) => e.type === type)) return i
     added++
     return { ...i, effects: [...i.effects, newEffect(type)] }
   })
@@ -367,11 +387,152 @@ export function removeEffect(p: Project, itemId: string, effectId: string): Proj
 
 /** Меняет поля «Кадра» куска (значения зажимаются в пределы; кроп не съедает картинку целиком). prefer — какую сторону кропа двигают. */
 export function patchFrame(p: Project, itemId: string, patch: Partial<Frame>, prefer?: FrameKey): Project {
-  return { ...p, items: p.items.map((i) => (i.id === itemId && canHaveEffects(p, i) ? { ...i, frame: patchFrameValues(i.frame, patch, prefer) } : i)) }
+  return {
+    ...p,
+    items: p.items.map((i) => {
+      if (i.id !== itemId || !canHaveEffects(p, i)) return i
+      const frame = patchFrameValues(i.frame, patch, prefer)
+      // у надписи кропа нет
+      return { ...i, frame: i.kind === 'text' ? { ...frame, cl: 0, cr: 0, ct: 0, cb: 0 } : frame }
+    })
+  }
 }
 
+/** «Сбросить» кадр: значения по умолчанию и без ключей положения, масштаба и прозрачности. */
 export function resetFrame(p: Project, itemId: string): Project {
-  return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, frame: { ...DEFAULT_FRAME } } : i)) }
+  return { ...p, items: p.items.map((i) => (i.id === itemId ? { ...i, frame: { ...DEFAULT_FRAME }, keys: noKeys() } : i)) }
+}
+
+// --- ключевые кадры ---
+
+/** Секунды от начала куска для момента таймлайна tl, в пределах куска. */
+const relTime = (it: Item, tl: number): number => Math.min(itemDur(it), Math.max(0, tl - it.start))
+const animatable = (p: Project, it: Item | undefined): it is Item => !!it && canHaveEffects(p, it)
+const withKeys = (p: Project, id: string, fn: (it: Item) => Item): Project => ({ ...p, items: p.items.map((i) => (i.id === id && animatable(p, i) ? fn(i) : i)) })
+
+/** Значение свойства куска (по ключам) в момент таймлайна tl — то, что показывают поля инспектора. */
+export function frameValueAt(it: Item, prop: KeyProp, tl: number): number {
+  return propAt(it, prop, relTime(it, tl))
+}
+
+/**
+ * Правка значения свойства в момент tl. Есть ключи — ставит ключ в этот момент (или обновляет стоящий рядом), нет —
+ * меняет значение «Кадра». Так работают и поля инспектора, и перетаскивание картинки в превью.
+ */
+export function setPropAt(p: Project, id: string, prop: KeyProp, tl: number, v: number): Project {
+  return withKeys(p, id, (it) => {
+    if (it.keys[prop].length === 0) return { ...it, frame: patchFrameValues(it.frame, { [prop]: v }) }
+    const r = setKey(it.keys[prop], prop, relTime(it, tl), v, itemDur(it))
+    return { ...it, keys: { ...it.keys, [prop]: r.keys } }
+  })
+}
+
+/** Включает ромбик: в момент tl ставится ключ с текущим значением, дальше правки сами ставят ключи. */
+export function enableKeys(p: Project, id: string, prop: KeyProp, tl: number): Project {
+  return withKeys(p, id, (it) => {
+    if (it.keys[prop].length > 0) return it
+    const r = setKey([], prop, relTime(it, tl), it.frame[prop], itemDur(it))
+    return { ...it, keys: { ...it.keys, [prop]: r.keys } }
+  })
+}
+
+/** Выключает ромбик: ключи свойства убираются, значение «Кадра» становится тем, что было в момент tl. */
+export function disableKeys(p: Project, id: string, prop: KeyProp, tl: number): Project {
+  return withKeys(p, id, (it) => {
+    if (it.keys[prop].length === 0) return it
+    const v = evalKeys(it.keys[prop], it.frame[prop], relTime(it, tl))
+    return { ...it, frame: patchFrameValues(it.frame, { [prop]: v }), keys: { ...it.keys, [prop]: [] } }
+  })
+}
+
+/** Ставит ключ в момент tl со значением v (по умолчанию — текущее на линии). */
+export function addKeyAt(p: Project, id: string, prop: KeyProp, tl: number, v?: number): Project {
+  return withKeys(p, id, (it) => {
+    const t = relTime(it, tl)
+    const r = setKey(it.keys[prop], prop, t, v ?? evalKeys(it.keys[prop], it.frame[prop], t), itemDur(it))
+    return { ...it, keys: { ...it.keys, [prop]: r.keys } }
+  })
+}
+
+/** Двигает ключ по времени (и значению, если задано). */
+export function moveKeyTo(p: Project, id: string, prop: KeyProp, index: number, tl: number, v?: number): Project {
+  return withKeys(p, id, (it) => {
+    const ks = it.keys[prop]
+    if (index < 0 || index >= ks.length) return it
+    return { ...it, keys: { ...it.keys, [prop]: moveKey(ks, prop, index, relTime(it, tl), v ?? ks[index].v, itemDur(it)) } }
+  })
+}
+
+/** Удаляет ключ; когда последний ключ удалён, свойство перестаёт анимироваться и держит его значение. */
+export function deleteKeyAt(p: Project, id: string, prop: KeyProp, index: number): Project {
+  return withKeys(p, id, (it) => {
+    const ks = it.keys[prop]
+    if (index < 0 || index >= ks.length) return it
+    if (ks.length === 1) return { ...it, frame: patchFrameValues(it.frame, { [prop]: ks[0].v }), keys: { ...it.keys, [prop]: [] } }
+    return { ...it, keys: { ...it.keys, [prop]: ks.filter((_, i) => i !== index) } }
+  })
+}
+
+// --- ключи на таймлайне: ромбик на куске — все ключи свойств, стоящие в одной точке времени ---
+
+const SAME_TIME = 0.011
+
+/** Времена (секунды от начала куска), в которых у куска есть хоть один ключ, по возрастанию без повторов. */
+export function keyTimes(it: Item): number[] {
+  const out: number[] = []
+  for (const t of KEY_PROPS.flatMap((k) => it.keys[k].map((x) => x.t)).sort((a, b) => a - b)) if (out.length === 0 || t - out[out.length - 1] > SAME_TIME) out.push(t)
+  return out
+}
+
+/** Двигает все ключи, стоящие в точке rel (от начала куска), в момент таймлайна tl. */
+export function moveKeysAtTime(p: Project, id: string, rel: number, tl: number): Project {
+  return withKeys(p, id, (it) => {
+    const keys = { ...it.keys }
+    for (const k of KEY_PROPS) {
+      const i = keys[k].findIndex((x) => Math.abs(x.t - rel) <= SAME_TIME)
+      if (i >= 0) keys[k] = moveKey(keys[k], k, i, relTime(it, tl), keys[k][i].v, itemDur(it))
+    }
+    return { ...it, keys }
+  })
+}
+
+/** Удаляет все ключи в точке rel; свойство, у которого не осталось ключей, держит значение удалённого. */
+export function deleteKeysAtTime(p: Project, id: string, rel: number): Project {
+  let cur = p
+  const it = find(p, id)
+  if (!it) return p
+  for (const k of KEY_PROPS) {
+    const i = it.keys[k].findIndex((x) => Math.abs(x.t - rel) <= SAME_TIME)
+    if (i >= 0) cur = deleteKeyAt(cur, id, k, i)
+  }
+  return cur
+}
+
+/** Ставит ключи во всех анимируемых свойствах куска в момент tl (со значениями линии в этой точке). */
+export function addKeysAtTime(p: Project, id: string, tl: number): Project {
+  let cur = p
+  const it = find(p, id)
+  if (!it) return p
+  for (const k of KEY_PROPS) if (it.keys[k].length > 0) cur = addKeyAt(cur, id, k, tl)
+  return cur
+}
+
+/** Плавность отрезков, которые начинаются в точке rel (у всех свойств). */
+export function setEaseAtTime(p: Project, id: string, rel: number, easeOn: boolean): Project {
+  return withKeys(p, id, (it) => {
+    const keys = { ...it.keys }
+    for (const k of KEY_PROPS) keys[k] = keys[k].map((x) => (Math.abs(x.t - rel) <= SAME_TIME ? { ...x, ease: easeOn } : x))
+    return { ...it, keys }
+  })
+}
+
+/** Плавность (ease in-out) отрезка от этого ключа до следующего. */
+export function setKeyEase(p: Project, id: string, prop: KeyProp, index: number, easeOn: boolean): Project {
+  return withKeys(p, id, (it) => {
+    const ks = it.keys[prop]
+    if (index < 0 || index >= ks.length) return it
+    return { ...it, keys: { ...it.keys, [prop]: ks.map((k, i) => (i === index ? { ...k, ease: easeOn } : k)) } }
+  })
 }
 
 // --- текстовые плашки ---
@@ -399,6 +560,7 @@ export function insertText(p: Project, at: number, styleId = 'text', len = DEFAU
     gain: [],
     effects: [],
     frame: { ...DEFAULT_FRAME },
+    keys: noKeys(),
     plate: newPlate(styleId, text),
     link: null
   }
