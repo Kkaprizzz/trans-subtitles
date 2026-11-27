@@ -8,7 +8,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { fontFamilyOf } from '../../../shared/fonts'
 import { CLIP_H, CLIP_W, clipSubtitleStyle } from '../../../shared/cut'
 import { animAt, isAnimated, propAt, type Anim } from '../../../shared/anim'
-import { faceAt, followOffset } from '../../../shared/face'
+import { faceAt, faceFrameAt, faceKeys, followOffset } from '../../../shared/face'
 import { gainAt } from '../../../shared/audio'
 import { cssFilter } from '../../../shared/effects'
 import { fitSize, frameRect, isDefaultFrame, type Frame } from '../../../shared/frame'
@@ -425,9 +425,38 @@ export default function Player(p: Props): React.JSX.Element {
         el.style.objectFit = framed && cv.mode === 'crop' ? 'cover' : 'contain'
         // с треком лица окно кропа ставит лицо в центр (ручной сдвиг клипа добавляется поверх); без трека — статичный сдвиг
         let posX = cv?.offsetX ?? 0.5
+        let zoomBox: { w: number; h: number; left: number; top: number } | null = null
         if (framed && cv.mode === 'crop' && it.face && it.face.length > 0 && m.width && m.height) {
           const srcT = activeIds.has(it.id) ? sourceTime(it, t) : it.in
-          posX = followOffset(faceAt(it.face, srcT), frameH * (m.width / m.height), frameW, cv.offsetX)
+          const keys = faceKeys(it.face, { srcW: m.width, srcH: m.height, outW: frameW, outH: frameH })
+          if (keys.some((k) => k.z > 1.001)) {
+            // общий план: картинка приближена к лицу (так же считает экспорт): элемент больше кадра и сдвинут, края кадра режут лишнее
+            const f = faceFrameAt(keys, srcT)
+            const k = Math.max(frameW / m.width, frameH / m.height) * f.z
+            const cw = m.width * k
+            const ch = m.height * k
+            const clampPx = (v: number, max: number): number => Math.min(max, Math.max(0, v))
+            zoomBox = {
+              w: cw,
+              h: ch,
+              left: -clampPx(f.wx * cw - frameW / 2 + (cv.offsetX - 0.5) * (cw - frameW), cw - frameW),
+              top: -clampPx(f.wy * ch - frameH / 2, ch - frameH)
+            }
+          } else posX = followOffset(faceAt(it.face, srcT), frameH * (m.width / m.height), frameW, cv.offsetX)
+        }
+        if (zoomBox) {
+          el.style.inset = 'auto'
+          el.style.width = `${zoomBox.w}px`
+          el.style.height = `${zoomBox.h}px`
+          el.style.left = `${zoomBox.left}px`
+          el.style.top = `${zoomBox.top}px`
+          el.style.objectFit = 'fill'
+        } else if (el.style.inset === 'auto') {
+          el.style.inset = ''
+          el.style.width = ''
+          el.style.height = ''
+          el.style.left = ''
+          el.style.top = ''
         }
         el.style.objectPosition = framed && cv.mode === 'crop' ? `${posX * 100}% 50%` : '50% 50%'
         // эффекты куска (блюр — в долях высоты кадра, как в экспорте)

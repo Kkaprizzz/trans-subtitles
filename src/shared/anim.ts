@@ -28,7 +28,7 @@ export type Keys = Record<KeyProp, Key[]>
 export const KEY_INFO: Record<KeyProp, { title: string; min: number; max: number; def: number; unit: string }> = {
   x: { title: 'Положение X', min: -150, max: 150, def: 0, unit: '%' },
   y: { title: 'Положение Y', min: -100, max: 100, def: 0, unit: '%' },
-  scale: { title: 'Масштаб', min: 10, max: 400, def: 100, unit: '%' },
+  scale: { title: 'Масштаб', min: 10, max: 800, def: 100, unit: '%' },
   opacity: { title: 'Прозрачность', min: 0, max: 100, def: 100, unit: '%' }
 }
 
@@ -37,7 +37,7 @@ export const MAX_KEYS = 100
 export const KEY_GAP = 0.02
 /** Предел итогового масштаба (как у поля «Масштаб»): защита от кадров-гигантов в экспорте. */
 export const SCALE_MIN = 0.05
-export const SCALE_MAX = 4
+export const SCALE_MAX = 8
 
 const r3 = (x: number): number => Math.round(x * 1000) / 1000
 const r2 = (x: number): number => Math.round(x * 100) / 100

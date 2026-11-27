@@ -11,7 +11,8 @@ import { animExpr, isAnimated, keysExpr, type Expr } from './anim.ts'
 import { gainExpr, gainPeak } from './audio.ts'
 import { effectFilters } from './effects.ts'
 import { fitSize, flipFilters, frameFilters, isStillFrame } from './frame.ts'
-import { framingChain } from './cut.ts'
+import { framingChain, type FaceFollow } from './cut.ts'
+import { faceKeys, type CropGeom } from './face.ts'
 import { itemDur, itemEnd, itemTrackKind, mediaOf, projectDuration, type Framing, type Project } from './project.ts'
 
 export type ExportFormat = 'h264' | 'prores422'
@@ -111,6 +112,23 @@ export function faceExpr(it: Project['items'][number]): string {
   return keysExpr(keys, 't')
 }
 
+/**
+ * Окно кропа клипа вокруг лица как выражения ffmpeg от времени t таймлайна: центр окна x и y (доли картинки) и приближение z
+ * (1 — «заполнить кадр»). y и z есть, только если на каком-то плане лицо маленькое и кадр приближается; иначе окно ходит
+ * одним x, как раньше. g — размеры картинки файла и кадра клипа.
+ */
+export function faceFollow(it: Project['items'][number], g: CropGeom): FaceFollow | undefined {
+  const track = it.face ?? []
+  if (track.length === 0) return undefined
+  const step = Math.max(1, Math.ceil(track.length / 150))
+  const pts = track.filter((_, i) => i % step === 0 || i === track.length - 1)
+  const frames = faceKeys(pts, g)
+  const at = (t: number): number => Math.round((it.start + (t - it.in) / it.speed) * 1000) / 1000
+  const line = (pick: (f: (typeof frames)[number]) => number): string => keysExpr(frames.map((f) => ({ t: at(f.t), v: pick(f), ease: true })), 't')
+  const zoomed = frames.some((f) => f.z > 1.001)
+  return zoomed ? { x: line((f) => f.wx), y: line((f) => f.wy), z: line((f) => f.z), srcW: g.srcW, srcH: g.srcH } : { x: faceExpr(it) }
+}
+
 const f3 = (x: number): string => (Math.round(x * 1000) / 1000).toFixed(3)
 
 /** Число или выражение ffmpeg одной строкой. */
@@ -207,7 +225,7 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
           const vOut = first.length || opaque ? `f${k}` : `v${k}`
           if (framed && o.framing) {
             // кроп клипа едет за лицом, если у куска есть трек: точки трека переводятся во время таймлайна (скорость учтена)
-            const follow = it.face && o.framing.mode === 'crop' && it.face.length > 0 ? faceExpr(it) : undefined
+            const follow = it.face && o.framing.mode === 'crop' && it.face.length > 0 ? faceFollow(it, { srcW: m.width ?? 0, srcH: m.height ?? 0, outW: W, outH: H }) : undefined
             graph.push(`[${k}:v]${timing}[r${k}]`, ...framingChain(`r${k}`, vOut, o.framing.mode, o.framing.offsetX, W, H, String(k), follow))
           } else {
             graph.push(`[${k}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,setsar=1,${timing}[${vOut}]`)

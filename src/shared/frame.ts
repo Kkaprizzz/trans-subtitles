@@ -22,7 +22,7 @@ export interface Frame {
 }
 
 export const DEFAULT_FRAME: Frame = { scale: 100, x: 0, y: 0, cl: 0, cr: 0, ct: 0, cb: 0, opacity: 100, flipH: 0, flipV: 0 }
-export const FRAME_LIMITS = { scale: [10, 400], x: [-150, 150], y: [-100, 100], cl: [0, 90], cr: [0, 90], ct: [0, 90], cb: [0, 90], opacity: [0, 100], flipH: [0, 1], flipV: [0, 1] } as const
+export const FRAME_LIMITS = { scale: [10, 800], x: [-150, 150], y: [-100, 100], cl: [0, 90], cr: [0, 90], ct: [0, 90], cb: [0, 90], opacity: [0, 100], flipH: [0, 1], flipV: [0, 1] } as const
 export type FrameKey = keyof Frame
 
 const clamp = (x: number, a: number, b: number): number => Math.min(b, Math.max(a, x))

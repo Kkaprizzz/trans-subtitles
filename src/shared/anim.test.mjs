@@ -70,7 +70,7 @@ const src = (o = {}) => ({ frame: { ...DEFAULT_FRAME }, keys: noKeys(), effects:
   assert.equal(isAnimated(src({ effects: [fx('pop')] })), true)
   assert.equal(isAnimated(src({ keys: k })), true)
   assert.equal(hasKeys(k), true)
-  assert.ok(animAt(src({ frame: { ...DEFAULT_FRAME, scale: 400 }, effects: [fx('zoom', { amount: 100, dur: 0.2 })] }), len, 3).scale <= 6, 'предел масштаба')
+  assert.ok(animAt(src({ frame: { ...DEFAULT_FRAME, scale: 800 }, effects: [fx('zoom', { amount: 100, dur: 0.2 })] }), len, 3).scale <= 8, 'предел масштаба (800 %)')
   assert.deepEqual(Object.keys(animSet([fx('fadeIn'), fx('zoom'), fx('blur')])).sort(), ['fadeIn', 'zoom'])
 }
 

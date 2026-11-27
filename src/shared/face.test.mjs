@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
-import { buildTrack, cleanFace, decodeYunet, faceAt, followOffset, iou, letterbox, nms, sameFace } from './face.ts'
+import { buildTrack, cleanFace, decodeYunet, faceAt, faceFrame, faceFrameAt, faceKeys, followOffset, iou, letterbox, nms, sameFace } from './face.ts'
 import { applyFaceTrack, clearFace, joinItems } from './mix.ts'
-import { buildExport, faceExpr } from './exportGraph.ts'
+import { buildExport, faceExpr, faceFollow } from './exportGraph.ts'
 import { addMedia, insertMedia, itemDur, newProject, sanitizeProject, splitItem } from './project.ts'
 
 const near = (a, b, msg, eps = 1e-3) => assert.ok(Math.abs(a - b) < eps, `${msg}: ${a} != ${b}`)
@@ -278,6 +278,88 @@ const SEED = (t, b) => ({ mode: 'seed', seed: { t, box: b } })
   const blur = buildExport(cp, { W: 1080, H: 1920, fps: 30, format: 'h264', quality: 'small', subLayers: [], framing: { mediaId: p.media[0].id, mode: 'fit-blur', offsetX: 0.5 } }, '/o.mp4').args
   assert.ok(!/clip\(\(/.test(blur[blur.indexOf('-filter_complex') + 1]))
   assert.equal(itemDur(it) > 0, true)
+}
+
+// --- кадр 9:16 вокруг лица: приближение и вертикаль
+{
+  const g = { srcW: 1280, srcH: 720, outW: 1080, outH: 1920 }
+  // крупный план (лицо 14% ширины картинки): приближать некуда, окно — вся высота картинки, ходит только по x
+  const close = faceFrame({ x: 0.5, y: 0.35, w: 0.14 }, g)
+  near(close.z, 1, 'крупный план — без приближения'); near(close.wy, 0.5, 'окно во всю высоту — центр по высоте 0,5')
+  // трек старого вида (нет y и w) — как раньше: без приближения
+  near(faceFrame({ x: 0.3 }, g).z, 1, 'нет ширины лица — без приближения')
+  // общий план (лицо 4%): приближение упирается в предел, окно идёт к лицу по высоте, лицо чуть выше середины окна
+  const far = faceFrame({ x: 0.74, y: 0.28, w: 0.04 }, g)
+  near(far.z, 1.8, 'общий план — приближение до предела 1,8'); near(far.wx, 0.74, 'по x окно стоит на лице')
+  near(far.wy, 0.28 + 0.1 * (1 / 1.8), 'лицо на высоте 0,4 окна: центр окна ниже лица на 0,1 высоты окна')
+  // окно не выходит за картинку: лицо у самого верха и у самого края
+  const top = faceFrame({ x: 0.02, y: 0.05, w: 0.04 }, g)
+  near(top.wy, 0.5 / 1.8, 'окно упёрлось в верх картинки'); assert.ok(top.wx >= (g.outW / g.outH * g.srcH / g.srcW) / 1.8 / 2 - 1e-3, 'и в левый край')
+  // лицо среднего размера (10%): приближение небольшое и плавное, не скачок до предела
+  const mid = faceFrame({ x: 0.5, y: 0.4, w: 0.1 }, g)
+  assert.ok(mid.z > 1 && mid.z < 1.2, `средний план: небольшое приближение (${mid.z})`)
+  // между точками трека кадр идёт плавно (ease), за краями держится крайняя
+  const ks = faceKeys([{ t: 0, x: 0.3, y: 0.5, w: 0.14 }, { t: 4, x: 0.74, y: 0.28, w: 0.04 }], g)
+  near(faceFrameAt(ks, -1).z, 1, 'до начала — первая точка'); near(faceFrameAt(ks, 9).z, 1.8, 'после конца — последняя')
+  near(faceFrameAt(ks, 2).z, (1 + 1.8) / 2, 'посередине — середина (ease 0,5)'); near(faceFrameAt(ks, 2).wx, (0.3 + 0.74) / 2, 'и по x')
+}
+{
+  // поиск лиц даёт у точек трека y и w; без смены плана они постоянны, с переходом на другого человека меняются вместе с x
+  const s = frames(0, 12, () => [box(0.5, 0.3, 0.05, 0.09)])
+  const tr = buildTrack(s, SEED(2, box(0.5, 0.3, 0.05, 0.09)))
+  near(tr[0].y, 0.3, 'высота лица записана', 0.01); near(tr[0].w, 0.05, 'ширина лица записана', 0.01)
+  assert.deepEqual(cleanFace(tr), tr, 'трек с y и w проходит чистку без потерь')
+  assert.equal(sameFace(tr, tr.map((q) => ({ ...q, w: q.w * 1.5 }))), false, 'другая ширина — другой трек')
+  assert.deepEqual(cleanFace([{ t: 0, x: 0.5 }]), [{ t: 0, x: 0.5 }], 'старый трек без y и w читается как раньше')
+  // два человека: общий план, говорит правый — y и w от правого, а не от соседа
+  const two = frames(0, 20, (t) => [box(0.25, 0.4, 0.06, 0.1), box(0.7, 0.3, 0.04, 0.08)].map((b, i) => ({ ...b, act: i === 1 ? 8 : 1 })))
+  const tt = buildTrack({ samples: two, cuts: [], speech: [[0, 20]] }, { mode: 'speaker' })
+  near(tt.at(-1).x, 0.7, 'кадр на правом', 0.03); near(tt.at(-1).y, 0.3, 'высота — правого', 0.02); near(tt.at(-1).w, 0.04, 'ширина — правого', 0.01)
+}
+{
+  // вертикальный проект: на общем плане к ключам X добавляются ключи Y и масштаба
+  let p = newProject('Z')
+  p = addMedia(p, V('/a.mp4', 20)).p
+  const ins = insertMedia(p, p.media[0].id, 0)
+  p = ins.p
+  const id = ins.id
+  const farTrack = [{ t: 0, x: 0.74, y: 0.28, w: 0.04 }, { t: 10, x: 0.74, y: 0.28, w: 0.04 }, { t: 20, x: 0.3, y: 0.3, w: 0.04 }]
+  const zoomed = applyFaceTrack(p, id, farTrack, { w: 1080, h: 1920 })
+  const it = zoomed.p.items[0]
+  const fill = (1920 / (1080 * 9 / 16)) * 100
+  assert.equal(zoomed.keyed, true)
+  assert.ok(it.keys.y.length >= 2 && it.keys.scale.length >= 2, `общий план: есть ключи Y и масштаба (${it.keys.y.length}, ${it.keys.scale.length})`)
+  near(it.frame.scale, fill, 'базовый масштаб — «заполнить»', 0.5); near(it.keys.scale[0].v, fill * 1.8, 'масштаб ключа — заполнить × приближение', 0.5)
+  // лицо выше середины картинки: картинка сдвинута вниз (положительный Y), но не дальше, чем позволяют её края
+  const picH = 607.5 * (fill * 1.8) / 100
+  near(it.keys.y[0].v, ((0.5 - (0.28 + 0.1 / 1.8)) * picH / 1920) * 100, 'сдвиг по Y выводит лицо в кадр', 0.5)
+  assert.ok(it.keys.y.every((k) => Math.abs(k.v) <= ((picH - 1920) / 2 / 1920) * 100 + 0.01), 'картинка не оголяет края по высоте')
+  // крупный план (нет y и w, или лицо большое) — по-прежнему только ключи X
+  const closeTrack = [{ t: 0, x: 0.5, y: 0.4, w: 0.14 }, { t: 20, x: 0.4, y: 0.4, w: 0.14 }]
+  const plain = applyFaceTrack(p, id, closeTrack, { w: 1080, h: 1920 }).p.items[0]
+  assert.equal(plain.keys.y.length, 0, 'без приближения нет ключей Y'); assert.equal(plain.keys.scale.length, 0, 'и масштаба')
+}
+{
+  // экспорт клипа: на общем плане кадр масштабируется по времени и режется окном вокруг лица; на крупном — как раньше
+  const build = (track) => {
+    let p = newProject('E')
+    p = addMedia(p, V('/a.mp4', 20)).p
+    const ins = insertMedia(p, p.media[0].id, 0)
+    p = { ...ins.p, canvas: { w: 1920, h: 1080 }, items: ins.p.items.map((i) => ({ ...i, face: track })) }
+    const cmd = buildExport(p, { W: 1080, H: 1920, fps: 30, format: 'h264', quality: 'small', subLayers: [], framing: { mediaId: p.media[0].id, mode: 'crop', offsetX: 0.5 } }, '/o.mp4')
+    return cmd.args[cmd.args.indexOf('-filter_complex') + 1]
+  }
+  const far = build([{ t: 0, x: 0.74, y: 0.28, w: 0.04 }, { t: 20, x: 0.74, y: 0.28, w: 0.04 }])
+  assert.ok(/scale=w='\(2\*trunc\(1280\*\(max\(1080\/1280,1920\/720\)\*\(/.test(far) && far.includes('eval=frame'), 'общий план: масштаб по времени (eval=frame), размер по известным px файла')
+  assert.ok(/crop=1080:1920:'clip\(\(/.test(far) && /':'clip\(\(/.test(far), 'и окно кропа ходит по x и по y')
+  const close = build([{ t: 0, x: 0.5, y: 0.4, w: 0.14 }, { t: 20, x: 0.5, y: 0.4, w: 0.14 }])
+  assert.ok(!close.includes('eval=frame'), 'крупный план — прежний кроп без пересчёта масштаба')
+  const old = build([{ t: 0, x: 0.5 }, { t: 20, x: 0.5 }])
+  assert.ok(!old.includes('eval=frame'), 'трек старого вида — тоже')
+  // выражения кадра сходятся с расчётом по точкам: z в начале = 1,8
+  const f = faceFollow({ start: 0, in: 0, speed: 1, face: [{ t: 0, x: 0.74, y: 0.28, w: 0.04 }, { t: 5, x: 0.74, y: 0.28, w: 0.04 }] }, { srcW: 1280, srcH: 720, outW: 1080, outH: 1920 })
+  assert.ok(f.x && f.y && f.z && f.z.includes('1.8'), 'z — приближение 1,8')
+  assert.equal(faceFollow({ start: 0, in: 0, speed: 1, face: [] }, { srcW: 1280, srcH: 720, outW: 1080, outH: 1920 }), undefined)
 }
 
 console.log('face.ts: все проверки прошли')

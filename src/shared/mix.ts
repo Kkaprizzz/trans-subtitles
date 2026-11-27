@@ -3,10 +3,10 @@
  * Операции чистые, как в project.ts; запрет на закреплённой дорожке и причину отказа возвращают сами.
  */
 import { addPoint, clamp01, gainAt, mergeGain, movePoint } from './audio.ts'
-import { cleanKeys, evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKeys, propAt, setKey, type KeyProp } from './anim.ts'
+import { cleanKeys, evalKeys, joinEffects, KEY_PROPS, keysJoinGap, mergeKeys, moveKey, noKeys, propAt, setKey, type Key, type KeyProp } from './anim.ts'
 import { clampParam, EFFECTS, newEffect, type EffectType } from './effects.ts'
 import { DEFAULT_FRAME, fitSize, patchFrameValues, sameFrame, type Frame, type FrameKey } from './frame.ts'
-import { faceAt, sameFace, type FaceTrack } from './face.ts'
+import { faceFrameAt, faceKeys, sameFace, type FaceTrack } from './face.ts'
 import { DEFAULT_PLATE_LEN, newPlate, patchPlateValues, type Plate } from './plate.ts'
 import { DEFAULT_SHAPE_LEN, newShape, patchShapeValues, type Shape, type ShapeKind } from './shape.ts'
 import { addMedia, addTrackOf, finish, fits, insertMedia, isLayer, itemDur, itemEnd, itemTrackKind, MAX_SPEED, MIN_ITEM, MIN_SPEED, mediaOf, NEW_TRACK, splitItem, subsOf, tlToSrc, trackOf, uid, placeFree, type Item, type MediaRef, type Project, type TrackKind } from './project.ts'
@@ -583,8 +583,9 @@ export function patchPlate(p: Project, id: string, patch: Partial<Plate>): Proje
 
 /**
  * Записывает трек лица на кусок видео. Если кадр проекта уже картинки (вертикальный проект, видео шире), масштаб ставится
- * «заполнить кадр», а по треку строятся прореженные плавные ключи X (их можно править): лицо остаётся в центре кадра. Там, где
- * картинка и так во весь кадр (16:9), ключей нет: трек нужен кропу клипа «Нарезки». keyed — построены ли ключи.
+ * «заполнить кадр», а по треку строятся прореженные плавные ключи (их можно править): положение X, а на общих планах ещё
+ * положение Y и масштаб (приближение к лицу, см. faceFrame): лицо остаётся в кадре, а не пол под ним. Там, где картинка и так
+ * во весь кадр (16:9), ключей нет: трек нужен кропу клипа «Нарезки». keyed — построены ли ключи.
  */
 export function applyFaceTrack(p: Project, id: string, track: FaceTrack, canvas: { w: number; h: number } | null): { p: Project; keyed: boolean } {
   const it = find(p, id)
@@ -594,19 +595,35 @@ export function applyFaceTrack(p: Project, id: string, track: FaceTrack, canvas:
   const narrower = !!canvas && canvas.w / canvas.h < m.width / m.height - 0.02
   if (!canvas || !narrower) return { p: set({ ...it, face: track }), keyed: false }
   const fit = fitSize(m.width, m.height, canvas.w, canvas.h)
-  const scale = Math.min(400, Math.max(it.frame.scale, Math.max(canvas.w / fit.w, canvas.h / fit.h) * 100))
-  const picW = fit.w * (scale / 100)
-  const maxShift = Math.max(0, (picW - canvas.w) / 2)
+  const fill = Math.max(canvas.w / fit.w, canvas.h / fit.h) * 100
+  const frames = faceKeys(track, { srcW: m.width, srcH: m.height, outW: canvas.w, outH: canvas.h })
+  // приближение нужно, только если на каком-то плане лицо маленькое; иначе остаются одни ключи X, как раньше
+  const zoomed = frames.some((f) => f.z > 1.001)
   const eps = 1e-3
   const srcTimes = [it.in, ...track.map((q) => q.t).filter((t) => t > it.in + eps && t < it.out - eps), it.out]
-  const keys = srcTimes.map((t, i) => {
-    const cx = faceAt(track, t)
-    const face = it.frame.flipH ? 1 - cx : cx
-    const shift = Math.min(maxShift, Math.max(-maxShift, -(face - 0.5) * picW))
-    return { t: Math.round(((t - it.in) / it.speed) * 1000) / 1000, v: (shift / canvas.w) * 100, ease: i < srcTimes.length - 1 }
+  const keysX: Key[] = []
+  const keysY: Key[] = []
+  const keysS: Key[] = []
+  srcTimes.forEach((t, i) => {
+    const f = faceFrameAt(frames, t)
+    const scale = Math.min(800, fill * f.z)
+    const picW = fit.w * (scale / 100)
+    const picH = fit.h * (scale / 100)
+    const wx = it.frame.flipH ? 1 - f.wx : f.wx
+    const wy = it.frame.flipV ? 1 - f.wy : f.wy
+    const maxX = Math.max(0, (picW - canvas.w) / 2)
+    const maxY = Math.max(0, (picH - canvas.h) / 2)
+    const kt = Math.round(((t - it.in) / it.speed) * 1000) / 1000
+    const e = i < srcTimes.length - 1
+    keysX.push({ t: kt, v: (Math.min(maxX, Math.max(-maxX, -(wx - 0.5) * picW)) / canvas.w) * 100, ease: e })
+    if (zoomed) {
+      keysY.push({ t: kt, v: (Math.min(maxY, Math.max(-maxY, -(wy - 0.5) * picH)) / canvas.h) * 100, ease: e })
+      keysS.push({ t: kt, v: scale, ease: e })
+    }
   })
-  const x = cleanKeys({ x: keys }).x
-  return { p: set({ ...it, face: track, frame: patchFrameValues(it.frame, { scale }), keys: { ...it.keys, x } }), keyed: x.length > 0 }
+  const cleaned = cleanKeys({ x: keysX, y: keysY, scale: keysS })
+  const keys = { ...it.keys, x: cleaned.x, y: cleaned.y.length ? cleaned.y : it.keys.y, scale: cleaned.scale.length ? cleaned.scale : it.keys.scale }
+  return { p: set({ ...it, face: track, frame: patchFrameValues(it.frame, { scale: Math.min(800, fill) }), keys }), keyed: cleaned.x.length > 0 }
 }
 
 /** Убирает трек лица (ключи X, построенные по нему, остаются: они обычные и правятся руками). */

@@ -248,14 +248,35 @@ const even = (n: number): number => Math.max(2, Math.floor(n / 2) * 2)
  * crop: заполняем кадр (масштаб с запасом) и режем со сдвигом offsetX по горизонтали.
  * fit-blur: фон — та же картинка, уменьшенная, размытая и растянутая; сверху видео целиком.
  */
-export function framingChain(input: string, output: string, framing: Framing, offsetX: number, W: number, H: number, tag: string, follow?: string): string[] {
+/** Окно кропа, идущее за лицом, как выражения ffmpeg от времени t: центр (доли картинки) и приближение (1 — «заполнить кадр»; нет — без приближения). */
+export interface FaceFollow {
+  x: string
+  y?: string
+  z?: string
+  /** размеры картинки файла, px: нужны при приближении, чтобы считать размер приближённой картинки без iw/ih (crop помнит их с момента настройки) */
+  srcW?: number
+  srcH?: number
+}
+
+export function framingChain(input: string, output: string, framing: Framing, offsetX: number, W: number, H: number, tag: string, follow?: FaceFollow): string[] {
   const w = even(W)
   const h = even(H)
   if (framing === 'crop') {
     // follow — выражение от времени t: где лицо (доля ширины картинки). Окно кропа ставится лицом в центр, ручной сдвиг клипа
     // (offsetX, 0.5 — без сдвига) добавляется поверх; за края картинки окно не выходит
+    const manual = (clamp(offsetX, 0, 1) - 0.5).toFixed(4)
+    if (follow?.z && follow.y && follow.srcW && follow.srcH) {
+      // общий план: кадр приближается к лицу (масштаб меняется по времени, пересчитывается на каждом кадре), окно ходит и по высоте.
+      // Размер приближённой картинки считаем сами: crop помнит iw/ih с момента настройки и при меняющемся размере ошибался бы.
+      const k = `(max(${w}/${follow.srcW},${h}/${follow.srcH})*(${follow.z}))`
+      const sw = `(2*trunc(${follow.srcW}*${k}/2))`
+      const sh = `(2*trunc(${follow.srcH}*${k}/2))`
+      return [
+        `[${input}]scale=w='${sw}':h='${sh}':eval=frame,crop=${w}:${h}:'clip((${follow.x})*${sw}-ow/2+${manual}*(${sw}-ow),0,${sw}-ow)':'clip((${follow.y})*${sh}-oh/2,0,${sh}-oh)',setsar=1[${output}]`
+      ]
+    }
     const x = follow
-      ? `'clip((${follow})*iw-ow/2+${(clamp(offsetX, 0, 1) - 0.5).toFixed(4)}*(iw-ow),0,iw-ow)'`
+      ? `'clip((${follow.x})*iw-ow/2+${manual}*(iw-ow),0,iw-ow)'`
       : `(iw-ow)*${clamp(offsetX, 0, 1).toFixed(4)}`
     return [`[${input}]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}:${x}:(ih-oh)/2,setsar=1[${output}]`]
   }

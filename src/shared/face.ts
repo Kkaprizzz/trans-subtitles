@@ -25,6 +25,10 @@ export interface FacePoint {
   t: number
   /** центр лица, доля ширины картинки 0..1 */
   x: number
+  /** центр лица, доля высоты картинки 0..1 (нет — старый трек, считаем 0,5) */
+  y?: number
+  /** ширина лица, доля ширины картинки (нет — старый трек: приближения нет) */
+  w?: number
 }
 
 export type FaceTrack = FacePoint[]
@@ -303,21 +307,27 @@ interface PlateauPlan {
 const PAN_MIN = 1.2
 const PAN_MAX = 2.5
 
-function plateaus(xs: Array<number | null>, times: number[], force: boolean[], start: number, end: number, startX: number | null, o: TrackOpts): PlateauPlan {
+function plateaus(xs: Array<number | null>, ys: Array<number | null>, ws: Array<number | null>, times: number[], force: boolean[], start: number, end: number, startX: number | null, fbYW: { y: number; w: number } | null, o: TrackOpts): PlateauPlan {
   const n = xs.length
   // дыры закрываем: держим прежнее; до первой находки — первую; совсем нет — прежнее положение предыдущего плана или центр
-  const firstFound = xs.findIndex((v) => v !== null)
   const fallback = startX ?? 0.5
-  const filled: number[] = []
-  let last = firstFound >= 0 ? (xs[firstFound] as number) : fallback
-  for (let k = 0; k < n; k++) {
-    if (xs[k] !== null) last = xs[k] as number
-    filled.push(last)
+  const fill = (vs: Array<number | null>, fb: number): number[] => {
+    const first = vs.findIndex((v) => v !== null)
+    let prev = first >= 0 ? (vs[first] as number) : fb
+    return vs.map((v) => {
+      if (v !== null) prev = v
+      return prev
+    })
   }
+  const filled = fill(xs, fallback)
   // медиана по ±2 кадра: дрожь и разовые промахи детектора не двигают кадр
-  const med = filled.map((_, k) => median(filled.slice(Math.max(0, k - 2), Math.min(n, k + 3))))
+  const smooth = (vs: number[]): number[] => vs.map((_, k) => median(vs.slice(Math.max(0, k - 2), Math.min(n, k + 3))))
+  const med = smooth(filled)
+  // нет лица во всём плане — держим высоту и ширину прошлого плана (как положение x), а не сбрасываем приближение
+  const medY = smooth(fill(ys, fbYW?.y ?? 0.5))
+  const medW = smooth(fill(ws, fbYW?.w ?? 0))
   const first = median(med.slice(0, Math.min(n, 4)))
-  const pts: FacePoint[] = []
+  const segs: Array<{ a: number; b: number; x: number }> = []
   let curX = startX !== null && Math.abs(first - startX) < o.cutGuard ? startX : first
   let plateauStart = start
   let devRun = 0
@@ -337,14 +347,29 @@ function plateaus(xs: Array<number | null>, times: number[], force: boolean[], s
         // переход долгий и мягкий (кривая — ease в faceAt и в ключах): короткий сдвиг ≈ 1,2 с, через весь кадр — 2,5 с
         const pan = Math.min(PAN_MAX, Math.max(PAN_MIN, PAN_MIN + dist * 3))
         const panStart = Math.max(plateauStart, forced ? times[k] : times[devFrom])
-        pts.push({ t: plateauStart, x: curX }, { t: panStart, x: curX })
+        segs.push({ a: plateauStart, b: panStart, x: curX })
         curX = newX
         plateauStart = Math.min(end, panStart + pan)
         devRun = 0
       }
     } else devRun = 0
   }
-  pts.push({ t: plateauStart, x: curX }, { t: Math.max(plateauStart, end), x: curX })
+  segs.push({ a: plateauStart, b: Math.max(plateauStart, end), x: curX })
+  // высота и ширина лица на площадке — медиана по её кадрам (нет кадров — ближайший)
+  const pts: FacePoint[] = []
+  for (const s of segs) {
+    let idx: number[] = []
+    for (let k = 0; k < n; k++) if (times[k] >= s.a - 1e-6 && times[k] <= s.b + 1e-6) idx.push(k)
+    if (idx.length === 0) {
+      let best = 0
+      for (let k = 1; k < n; k++) if (Math.abs(times[k] - (s.a + s.b) / 2) < Math.abs(times[best] - (s.a + s.b) / 2)) best = k
+      idx = [best]
+    }
+    const y = median(idx.map((k) => medY[k]))
+    const w = median(idx.map((k) => medW[k]))
+    const base = w > 0 ? { y, w } : { y }
+    pts.push({ t: s.a, x: s.x, ...base }, { t: s.b, x: s.x, ...base })
+  }
   return { pts }
 }
 
@@ -399,8 +424,10 @@ export function buildTrack(scan: FaceScan | FaceSample[], req: TrackRequest, o: 
   const results: Array<FacePoint[] | null> = new Array(shots.length).fill(null)
   const lastX: Array<number | null> = new Array(shots.length).fill(null)
   const firstX: Array<number | null> = new Array(shots.length).fill(null)
+  const lastYW: Array<{ y: number; w: number } | null> = new Array(shots.length).fill(null)
+  const firstYW: Array<{ y: number; w: number } | null> = new Array(shots.length).fill(null)
 
-  const doShot = (si: number, prevPos: number | null): void => {
+  const doShot = (si: number, prevPos: number | null, prevYW: { y: number; w: number } | null): void => {
     const sh = shots[si]
     const persons = linkPersons(samples, sh.a, sh.b)
     const len = sh.b - sh.a + 1
@@ -429,32 +456,43 @@ export function buildTrack(scan: FaceScan | FaceSample[], req: TrackRequest, o: 
     }
     const targets = pickTargets(persons, samples, sh.a, sh.b, req.mode, firstPick, speech, opt)
     const xs = targets.map((ti, k) => (ti >= 0 ? clamp(boxCx(persons[ti].boxes[k] as FaceBox), 0, 1) : null))
+    const ys = targets.map((ti, k) => (ti >= 0 ? clamp(boxCy(persons[ti].boxes[k] as FaceBox), 0, 1) : null))
+    const ws = targets.map((ti, k) => (ti >= 0 ? (persons[ti].boxes[k] as FaceBox).w : null))
     const force = targets.map((ti, k) => k > 0 && ti >= 0 && targets[k - 1] >= 0 && ti !== targets[k - 1])
     const times = samples.slice(sh.a, sh.b + 1).map((s) => s.t)
     const start = sh.cut ?? times[0]
     const end = shots[si + 1] ? (shots[si + 1].cut as number) - CUT_JUMP : times[times.length - 1]
-    const plan = plateaus(xs, times, force, start, Math.max(start, end), prevPos, opt)
+    const plan = plateaus(xs, ys, ws, times, force, start, Math.max(start, end), prevPos, prevYW, opt)
     results[si] = plan.pts
     firstX[si] = plan.pts[0].x
     lastX[si] = plan.pts[plan.pts.length - 1].x
+    const yw = (q: FacePoint): { y: number; w: number } | null => (q.y !== undefined ? { y: q.y, w: q.w ?? 0 } : null)
+    firstYW[si] = yw(plan.pts[0])
+    lastYW[si] = yw(plan.pts[plan.pts.length - 1])
   }
   // порядок: от плана с выбранным лицом вперёд, потом назад (для «по щелчку»); для «говорящего» — просто вперёд
   if (req.mode === 'seed' && seed) {
     let prev: number | null = null
+    let prevYW: { y: number; w: number } | null = null
     for (let si = seedShot; si < shots.length; si++) {
-      doShot(si, prev)
+      doShot(si, prev, prevYW)
       prev = lastX[si]
+      prevYW = lastYW[si]
     }
     prev = firstX[seedShot]
+    prevYW = firstYW[seedShot]
     for (let si = seedShot - 1; si >= 0; si--) {
-      doShot(si, prev)
+      doShot(si, prev, prevYW)
       prev = firstX[si]
+      prevYW = firstYW[si]
     }
   } else {
     let prev: number | null = seed ? boxCx(seed.box) : null
+    let prevYW: { y: number; w: number } | null = seed ? { y: boxCy(seed.box), w: seed.box.w } : null
     for (let si = 0; si < shots.length; si++) {
-      doShot(si, prev)
+      doShot(si, prev, prevYW)
       prev = lastX[si]
+      prevYW = lastYW[si]
     }
   }
 
@@ -464,7 +502,7 @@ export function buildTrack(scan: FaceScan | FaceSample[], req: TrackRequest, o: 
     const pts = (results[si] as FacePoint[]).map((q) => ({ ...q }))
     if (si > 0 && out.length) {
       const prevX = out[out.length - 1].x
-      if (Math.abs(pts[0].x - prevX) < opt.cutGuard) pts[0] = { t: pts[0].t, x: prevX }
+      if (Math.abs(pts[0].x - prevX) < opt.cutGuard) pts[0] = { ...pts[0], x: prevX }
     }
     out.push(...pts)
   }
@@ -472,12 +510,17 @@ export function buildTrack(scan: FaceScan | FaceSample[], req: TrackRequest, o: 
   const tidy: FacePoint[] = []
   for (let i = 0; i < out.length; i++) {
     const q = out[i]
-    const same = (o2: FacePoint | undefined): boolean => !!o2 && Math.abs(o2.x - q.x) < 1e-4
+    const same = (o2: FacePoint | undefined): boolean => !!o2 && Math.abs(o2.x - q.x) < 1e-4 && Math.abs((o2.y ?? 0.5) - (q.y ?? 0.5)) < 1e-4 && Math.abs((o2.w ?? 0) - (q.w ?? 0)) < 1e-4
     if (i > 0 && i < out.length - 1 && same(out[i - 1]) && same(out[i + 1])) continue
     if (tidy.length && q.t - tidy[tidy.length - 1].t < 0.005 && same(tidy[tidy.length - 1])) continue
     tidy.push(q)
   }
-  return tidy.slice(0, MAX_FACE_POINTS).map((q) => ({ t: r3(q.t), x: r4(clamp(q.x, 0, 1)) }))
+  return tidy.slice(0, MAX_FACE_POINTS).map((q) => {
+    const pt: FacePoint = { t: r3(q.t), x: r4(clamp(q.x, 0, 1)) }
+    if (q.y !== undefined) pt.y = r4(clamp(q.y, 0, 1))
+    if (q.w !== undefined && q.w > 0) pt.w = r4(clamp(q.w, 0.005, 1))
+    return pt
+  })
 }
 
 /** Положение лица (доля ширины картинки) в момент t исходника: между точками плавно, за краями держится крайняя. */
@@ -503,7 +546,14 @@ export function cleanFace(raw: unknown): FaceTrack | null {
   for (const p of raw as Array<Record<string, unknown>>) {
     const t = Number(p?.t)
     const x = Number(p?.x)
-    if (Number.isFinite(t) && t >= 0 && Number.isFinite(x)) pts.push({ t: r3(t), x: r4(clamp(x, 0, 1)) })
+    const y = Number(p?.y)
+    const w = Number(p?.w)
+    if (Number.isFinite(t) && t >= 0 && Number.isFinite(x)) {
+      const pt: FacePoint = { t: r3(t), x: r4(clamp(x, 0, 1)) }
+      if (p?.y !== undefined && Number.isFinite(y)) pt.y = r4(clamp(y, 0, 1))
+      if (p?.w !== undefined && Number.isFinite(w) && w > 0) pt.w = r4(clamp(w, 0.005, 1))
+      pts.push(pt)
+    }
   }
   pts.sort((a, b) => a.t - b.t)
   const out = pts.filter((p, i) => i === 0 || p.t - pts[i - 1].t > 0.001).slice(0, MAX_FACE_POINTS)
@@ -511,7 +561,79 @@ export function cleanFace(raw: unknown): FaceTrack | null {
 }
 
 export const sameFace = (a: FaceTrack | null, b: FaceTrack | null): boolean =>
-  a === b || (!!a && !!b && a.length === b.length && a.every((p, i) => Math.abs(p.t - b[i].t) < 1e-6 && Math.abs(p.x - b[i].x) < 1e-6))
+  a === b ||
+  (!!a &&
+    !!b &&
+    a.length === b.length &&
+    a.every((p, i) => Math.abs(p.t - b[i].t) < 1e-6 && Math.abs(p.x - b[i].x) < 1e-6 && Math.abs((p.y ?? 0.5) - (b[i].y ?? 0.5)) < 1e-6 && Math.abs((p.w ?? 0) - (b[i].w ?? 0)) < 1e-6))
+
+// --- кадр 9:16 вокруг лица: приближение и вертикаль ---
+
+/** Куда ставим лицо в кадре и насколько приближаем. */
+export const FACE_FRAME = {
+  /** лицо занимает столько ширины кадра (на общем плане приближаем, пока не дойдём) */
+  width: 0.33,
+  /** дальше «заполнить кадр» больше не приближаем: у 720p картинка начнёт мылиться */
+  maxZoom: 1.8,
+  /** центр лица стоит на такой высоте кадра (0 — верх, 1 — низ), чуть выше середины */
+  faceY: 0.4
+}
+
+/** Размеры картинки файла и кадра результата, px (нужны только отношения). */
+export interface CropGeom {
+  srcW: number
+  srcH: number
+  outW: number
+  outH: number
+}
+
+/** Окно кропа: z — приближение относительно «заполнить кадр» (1 — без приближения), wx, wy — центр окна, доли картинки. */
+export interface FaceFrame {
+  z: number
+  wx: number
+  wy: number
+}
+
+/**
+ * Кадр вокруг лица. На «заполнить кадр» окно кропа занимает всю высоту картинки и только ходит вправо-влево. На общем плане лицо
+ * маленькое и высоко, поэтому окно уменьшается (приближение z до FACE_FRAME.maxZoom) и ходит ещё и вверх-вниз: лицо стоит в кадре
+ * на высоте faceY. Края картинки окно не пересекает.
+ */
+export function faceFrame(pt: { x: number; y?: number; w?: number }, g: CropGeom): FaceFrame {
+  // ширина окна при z = 1, доля ширины картинки
+  const ww1 = Math.min(1, ((g.outW / g.outH) * g.srcH) / g.srcW)
+  const z = pt.w && pt.w > 0 ? clamp((FACE_FRAME.width * ww1) / pt.w, 1, FACE_FRAME.maxZoom) : 1
+  const ww = ww1 / z
+  const wh = 1 / z
+  const wx = clamp(pt.x, ww / 2, 1 - ww / 2)
+  const wy = z > 1 ? clamp((pt.y ?? 0.5) + (0.5 - FACE_FRAME.faceY) * wh, wh / 2, 1 - wh / 2) : 0.5
+  return { z: r4(z), wx: r4(wx), wy: r4(wy) }
+}
+
+export interface FaceKey extends FaceFrame {
+  /** секунды исходника */
+  t: number
+}
+
+/** Кадр в каждой точке трека. */
+export const faceKeys = (track: FaceTrack, g: CropGeom): FaceKey[] => track.map((p) => ({ t: p.t, ...faceFrame(p, g) }))
+
+/** Кадр в момент t: между точками плавно (ease), за краями держится крайняя. */
+export function faceFrameAt(keys: FaceKey[], t: number): FaceFrame {
+  const n = keys.length
+  if (n === 0) return { z: 1, wx: 0.5, wy: 0.5 }
+  if (t <= keys[0].t) return keys[0]
+  if (t >= keys[n - 1].t) return keys[n - 1]
+  for (let i = 1; i < n; i++) {
+    if (t < keys[i].t) {
+      const a = keys[i - 1]
+      const b = keys[i]
+      const u = ease((t - a.t) / Math.max(1e-9, b.t - a.t))
+      return { z: a.z + (b.z - a.z) * u, wx: a.wx + (b.wx - a.wx) * u, wy: a.wy + (b.wy - a.wy) * u }
+    }
+  }
+  return keys[n - 1]
+}
 
 /**
  * Сдвиг окна кропа 0..1 (как offsetX клипа): окно шириной ow в картинке шириной iw стоит так, чтобы лицо (cx) было в центре;
