@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { access, mkdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { videoInputArgs } from './decoder'
 import { FFMPEG } from './paths'
 
 export async function thumbnail(mediaPath: string, duration: number, alpha = false): Promise<string> {
@@ -19,7 +20,7 @@ export async function thumbnail(mediaPath: string, duration: number, alpha = fal
   await mkdir(join(app.getPath('userData'), 'thumbs'), { recursive: true })
   // у баннера с альфой берём кадр ближе к середине: в начале картинки обычно ещё нет
   const at = Math.min(Math.max(0, duration * (alpha ? 0.4 : 0.1)), 30)
-  const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', at.toFixed(2), '-i', mediaPath, '-frames:v', '1', '-vf', alpha ? 'scale=320:-2,format=rgba' : 'scale=320:-2', ...(alpha ? [] : ['-q:v', '4']), out], {
+  const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', at.toFixed(2), ...(await videoInputArgs(mediaPath)), '-i', mediaPath, '-frames:v', '1', '-vf', alpha ? 'scale=320:-2,format=rgba' : 'scale=320:-2', ...(alpha ? [] : ['-q:v', '4']), out], {
     stdio: ['ignore', 'ignore', 'pipe']
   })
   let err = ''

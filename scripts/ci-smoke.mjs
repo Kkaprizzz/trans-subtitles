@@ -77,6 +77,29 @@ for (const x of r?.renders ?? []) {
   if (x.format === 'animation' && !/^(argb|bgra|rgba|abgr)$/.test(v.pix_fmt)) failures.push(`render animation: нет альфы (${v.pix_fmt})`)
 }
 
+// 3) экспорт видео в AV1: в сборках ffmpeg без libdav1d (Windows) AV1 читается только запасным декодером, без него поток пустой и экспорт падает
+const av1 = join(dir, 'smoke-av1.mp4')
+const genAv1 = spawnSync(FFMPEG, [
+  '-hide_banner', '-loglevel', 'error', '-y',
+  '-f', 'lavfi', '-i', 'testsrc2=s=320x180:r=30',
+  '-f', 'lavfi', '-i', 'sine=frequency=330:sample_rate=44100',
+  '-t', '3', '-c:v', 'libaom-av1', '-cpu-used', '8', '-crf', '45', '-b:v', '0', '-pix_fmt', 'yuv420p', '-c:a', 'aac', av1
+], { encoding: 'utf8' })
+if (genAv1.status !== 0) {
+  failures.push(`av1: не удалось сделать тестовый файл: ${genAv1.stderr}`)
+} else {
+  const x = run('av1-export', { TS_SELFTEST: av1, TS_EXPORT: '1', TS_RENDER_DIR: dir })
+  if (x?.exportError) failures.push(`av1-export: ${x.exportError}`)
+  else if (x?.exported) {
+    const p = JSON.parse(spawnSync(FFPROBE, ['-v', 'error', '-count_frames', '-print_format', 'json', '-show_streams', x.exported.path], { encoding: 'utf8' }).stdout)
+    const v = p.streams.find((s) => s.codec_type === 'video')
+    const a = p.streams.find((s) => s.codec_type === 'audio')
+    console.log(`  av1-export: ${v?.codec_name} кадров ${v?.nb_read_frames} звук ${a ? a.codec_name : 'нет'}`)
+    if (!v || Number(v.nb_read_frames) < 80) failures.push(`av1-export: кадров ${v?.nb_read_frames}, ожидалось около 90`)
+    if (!a) failures.push('av1-export: нет звука')
+  } else failures.push('av1-export: нет результата')
+}
+
 rmSync(dir, { recursive: true, force: true })
 if (failures.length) {
   console.error('ПРОВАЛ:\n' + failures.join('\n'))

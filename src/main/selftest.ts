@@ -9,12 +9,15 @@
  *   TS_RENDER=animation,prores4444,h264-green   TS_RENDER_DIR=/папка
  *   TS_RENDER_SIZE=1080x1920  TS_RENDER_FPS=30  TS_RENDER_AUDIO=1  TS_STYLE='{"mode":"highlight"}'
  *   TS_RENDER_CANCEL_MS=2000     отменить рендер через столько мс (проверка отмены)
+ *   TS_EXPORT=1  TS_RENDER_DIR=/папка   экспорт таймлайна из этого файла (проверка чтения видео, например AV1 без libdav1d)
  */
 import { app } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { normalizeStyle } from '../shared/timeline'
 import type { MediaInfo, ModelId, RenderFormat, RenderResult, Word } from '../shared/types'
+import { addMedia, insertMedia, newProject } from '../shared/project'
 import { transcribe } from './asr'
+import { exportTimeline } from './exportTimeline'
 import { allowFontFile } from './fontFiles'
 import { probeMedia } from './media'
 import { downloadModel, listModels } from './models'
@@ -28,6 +31,9 @@ interface Report {
   asrSeconds?: number
   words?: Word[]
   asrError?: string
+  /** результат TS_EXPORT: файл экспорта или причина, почему не вышло */
+  exported?: { path: string; bytes: number }
+  exportError?: string
   renders: Array<{ format: string; size: string; fps: number; result?: RenderResult; error?: string; cancelledAfterMs?: number }>
   /** пик рабочего набора по типам процессов, МБ */
   peakMemMB: Record<string, number>
@@ -71,6 +77,22 @@ export async function runSelfTest(file: string): Promise<void> {
       return finish(0)
     }
     if (process.env['TS_PROBE_ONLY'] === '1') return finish(0)
+
+    if (process.env['TS_EXPORT'] === '1') {
+      // экспорт таймлайна из одного файла: так видно, читает ли ffmpeg этого приложения его видео (AV1 в сборке без libdav1d и т.п.)
+      const out = `${process.env['TS_RENDER_DIR'] ?? '.'}/selftest_export.mp4`
+      try {
+        const added = addMedia(newProject('selftest'), { path: info.path, name: info.name, duration: info.duration, hasVideo: info.hasVideo, hasAudio: info.hasAudio, width: info.width, height: info.height, fps: info.fps, videoCodec: info.videoCodec, needsPreview: info.needsPreview })
+        const pr = insertMedia(added.p, added.id, 0).p
+        const res = await exportTimeline(pr, { format: 'h264', quality: 'small', width: 640, height: 360, fps: 30, burnSubtitles: false }, out, () => undefined, { cancelled: false })
+        report.exported = { path: res.path, bytes: res.bytes }
+        log(`экспорт: ${(res.bytes / 1048576).toFixed(2)} МБ · ${res.seconds.toFixed(1)} с`)
+      } catch (e) {
+        report.exportError = errText(e)
+        log(`экспорт: ОШИБКА ${report.exportError}`)
+      }
+      return finish(0)
+    }
 
     let words: Word[] = []
     if (process.env['TS_WORDS_FILE']) {

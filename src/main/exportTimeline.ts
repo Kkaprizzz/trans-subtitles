@@ -12,6 +12,8 @@ import { buildExport, type FramingOpt, type SubLayerInput, type TextLayerInput }
 import { itemEnd, projectDuration, subtitleLayers, timelineWords, type Project } from '../shared/project'
 import { DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../shared/timeline'
 import type { ClipsExportRequest, ClipsExportResult, ExportRequest, ExportResult, ProgressEvent } from '../shared/types'
+import { AV1_FALLBACK, ffmpegErrorText } from '../shared/ffmpeg'
+import { av1Fallback, withCodecs } from './decoder'
 import { FFMPEG } from './paths'
 import { renderLayerPng, renderOverlay, type CancelToken } from './render'
 
@@ -75,7 +77,9 @@ async function renderCore(p: Project, o: Core, outPath: string, emit: (e: Progre
       await renderLayerPng({ plate: it.plate ?? undefined, shape: it.shape ?? undefined, flipH: it.frame.flipH === 1, flipV: it.frame.flipV === 1 }, o.W, o.H, file)
       textLayers.push({ itemId: it.id, trackId: it.trackId, path: file, start: it.start, end: itemEnd(it) })
     }
-    const cmd = buildExport(p, { W: o.W, H: o.H, fps: o.fps, format: o.format, quality: o.quality, subLayers, framing: o.framing, textLayers }, outPath)
+    // сборка ffmpeg без libdav1d (Windows): AV1 читаем запасным декодером, иначе поток пустой и экспорт падает
+    const av1 = (await av1Fallback()) ? AV1_FALLBACK : undefined
+    const cmd = buildExport(av1 ? await withCodecs(p) : p, { W: o.W, H: o.H, fps: o.fps, format: o.format, quality: o.quality, subLayers, framing: o.framing, textLayers, av1Decoder: av1 }, outPath)
     const ff = spawn(FFMPEG, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let err = ''
     ff.stderr.on('data', (d) => (err += d))
@@ -94,7 +98,7 @@ async function renderCore(p: Project, o: Core, outPath: string, emit: (e: Progre
     try {
       const code = await Promise.race([exited, spawnFailed])
       if (cancel.cancelled) throw new Error('Отменено')
-      if (code !== 0) throw new Error(`ffmpeg: ${err.trim().split('\n').pop() || 'неизвестная ошибка'}`)
+      if (code !== 0) throw new Error(`ffmpeg: ${ffmpegErrorText(err)}`)
     } catch (e) {
       ff.kill('SIGKILL')
       await exited

@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, rename, rm, stat, utimes } from 'node:fs/promises'
 import { join } from 'node:path'
+import { videoInputArgs } from './decoder'
 import { FFMPEG } from './paths'
 
 export { needsPreview } from '../shared/formats'
@@ -49,11 +50,13 @@ export async function buildPreview(src: string, duration: number, onProgress: (v
   const job = (async () => {
     await mkdir(dir(), { recursive: true })
     const part = `${out}.part`
+    const dec = await videoInputArgs(src)
     await new Promise<void>((resolve, reject) => {
       const p = spawn(
         FFMPEG,
         [
           '-hide_banner', '-loglevel', 'error', '-y',
+          ...dec,
           '-i', src,
           '-map', '0:v:0', '-map', '0:a:0?',
           '-vf', `scale=w='min(960,iw)':h='min(960,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=${alpha ? 'yuva420p' : 'yuv420p'}`,

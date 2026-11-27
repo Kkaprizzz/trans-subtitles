@@ -13,6 +13,7 @@ import { pipeline } from 'node:stream/promises'
 import type { FaceScan } from '../shared/face'
 import type { FacePreview, FaceStatus, ProgressEvent } from '../shared/types'
 import { probeMedia } from './media'
+import { videoInputArgs } from './decoder'
 import { FFMPEG } from './paths'
 
 type Emit = (e: ProgressEvent) => void
@@ -65,6 +66,7 @@ export async function detectFaces(mediaPath: string, from: number, to: number, f
   const info = await probeMedia(mediaPath)
   if (!info.hasVideo || !info.width || !info.height) throw new Error('В файле нет видео')
   if (signal?.aborted) throw new Error('Отменено')
+  const dec = await videoInputArgs(mediaPath)
   return new Promise<FaceScan>((resolve, reject) => {
     const child = utilityProcess.fork(join(__dirname, 'face-worker.js'), [], { serviceName: 'face-worker' })
     let settled = false
@@ -87,7 +89,7 @@ export async function detectFaces(mediaPath: string, from: number, to: number, f
       else if (m.type === 'error') finish(() => reject(new Error(m.message)))
     })
     child.on('exit', (code) => finish(() => reject(new Error(`Поиск лиц завершился с кодом ${code}`))))
-    child.postMessage({ ffmpeg: FFMPEG, media: mediaPath, from, to, fps, srcW: info.width, srcH: info.height, modelPath: modelFile(), speaker })
+    child.postMessage({ ffmpeg: FFMPEG, dec, media: mediaPath, from, to, fps, srcW: info.width, srcH: info.height, modelPath: modelFile(), speaker })
   })
 }
 
@@ -95,8 +97,9 @@ export async function detectFaces(mediaPath: string, from: number, to: number, f
 export async function facePreview(mediaPath: string, t: number, signal?: AbortSignal): Promise<FacePreview> {
   const info = await probeMedia(mediaPath)
   if (!info.width || !info.height) throw new Error('В файле нет видео')
+  const dec = await videoInputArgs(mediaPath)
   const image = await new Promise<string>((resolve, reject) => {
-    const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-ss', t.toFixed(3), '-i', mediaPath, '-frames:v', '1', '-vf', 'scale=960:-2', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '4', 'pipe:1'], {
+    const ff = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-ss', t.toFixed(3), ...dec, '-i', mediaPath, '-frames:v', '1', '-vf', 'scale=960:-2', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '4', 'pipe:1'], {
       stdio: ['ignore', 'pipe', 'pipe']
     })
     const chunks: Buffer[] = []

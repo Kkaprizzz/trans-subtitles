@@ -19,6 +19,8 @@ const parentPort = (process as unknown as { parentPort: ParentPort }).parentPort
 
 interface RunMsg {
   ffmpeg: string
+  /** параметры входа для видео (запасной декодер AV1, если нужен) */
+  dec: string[]
   media: string
   from: number
   to: number
@@ -35,7 +37,7 @@ function findCuts(m: RunMsg): Promise<number[]> {
   return new Promise((resolve) => {
     const ff = spawn(
       m.ffmpeg,
-      ['-hide_banner', '-loglevel', 'info', '-ss', m.from.toFixed(3), '-t', Math.max(0.05, m.to - m.from).toFixed(3), '-i', m.media, '-an', '-sn', '-vf', "scale=320:-2,select='gt(scene,0.3)',showinfo", '-f', 'null', '-'],
+      ['-hide_banner', '-loglevel', 'info', '-ss', m.from.toFixed(3), '-t', Math.max(0.05, m.to - m.from).toFixed(3), ...m.dec, '-i', m.media, '-an', '-sn', '-vf', "scale=320:-2,select='gt(scene,0.3)',showinfo", '-f', 'null', '-'],
       { stdio: ['ignore', 'ignore', 'pipe'] }
     )
     let text = ''
@@ -109,7 +111,7 @@ async function mouthActivity(m: RunMsg, samples: FaceSample[], cuts: number[], o
   const len = Math.max(0.05, m.to - m.from)
   const ff = spawn(
     m.ffmpeg,
-    ['-hide_banner', '-loglevel', 'error', '-ss', m.from.toFixed(3), '-t', len.toFixed(3), '-i', m.media, '-an', '-sn', '-vf', `fps=${FPS}:round=up,scale=${W}:${H},format=gray`, '-f', 'rawvideo', 'pipe:1'],
+    ['-hide_banner', '-loglevel', 'error', '-ss', m.from.toFixed(3), '-t', len.toFixed(3), ...m.dec, '-i', m.media, '-an', '-sn', '-vf', `fps=${FPS}:round=up,scale=${W}:${H},format=gray`, '-f', 'rawvideo', 'pipe:1'],
     { stdio: ['ignore', 'pipe', 'ignore'] }
   )
   // std области рта у каждой рамки на каждом кадре; группируем по кадру поиска
@@ -184,7 +186,7 @@ async function run(m: RunMsg): Promise<FaceScan> {
     m.ffmpeg,
     [
       '-hide_banner', '-loglevel', 'error',
-      '-ss', m.from.toFixed(3), '-t', len.toFixed(3), '-i', m.media,
+      '-ss', m.from.toFixed(3), '-t', len.toFixed(3), ...m.dec, '-i', m.media,
       '-an', '-sn',
       '-vf', `fps=${m.fps}:round=up,scale=${S}:${S}:force_original_aspect_ratio=decrease,pad=${S}:${S}:(ow-iw)/2:(oh-ih)/2:black,format=rgb24`,
       '-f', 'rawvideo', 'pipe:1'

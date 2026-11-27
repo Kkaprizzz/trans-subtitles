@@ -900,6 +900,84 @@ textarea {
   left: 0;
   top: 0;
 }
+/* окно просмотра дорожек под линейкой и сдвигаемое содержимое (вертикальная прокрутка); шапки слева устроены так же */
+.tr-viewport,
+.tr-heads-view {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+.tr-content,
+.tr-heads-content {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+.tr-wrap {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 12px;
+  grid-template-rows: minmax(0, 1fr) 12px;
+}
+.tr-wrap > .tr-body {
+  grid-column: 1;
+  grid-row: 1;
+}
+.tr-heads {
+  margin-bottom: 12px;
+}
+/* полосы прокрутки: тонкие, всегда на виду, в тон интерфейса */
+.tr-sb {
+  position: relative;
+  background: var(--panel-sunk);
+  border-radius: 6px;
+}
+.tr-sb.v {
+  grid-column: 2;
+  grid-row: 1;
+  margin-left: 2px;
+}
+.tr-sb.h {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 2px;
+}
+.tr-sb-thumb {
+  position: absolute;
+  min-width: 28px;
+  min-height: 28px;
+  background: var(--panel-3);
+  border-radius: 6px;
+  cursor: grab;
+}
+.tr-sb.v .tr-sb-thumb {
+  left: 0;
+  right: 0;
+}
+.tr-sb.h .tr-sb-thumb {
+  top: 0;
+  bottom: 0;
+}
+.tr-sb-thumb:hover,
+.tr-sb-thumb:active {
+  background: var(--ink-3);
+}
+.tr-sb.idle .tr-sb-thumb {
+  background: var(--panel-2);
+  cursor: default;
+  pointer-events: none;
+}
+/* рамка выделения */
+.tr-marquee {
+  position: absolute;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
 .tr-lane {
   position: absolute;
   left: 0;

@@ -54,6 +54,8 @@ export interface GraphOpts {
   framing?: FramingOpt
   /** картинки надписей; они встают в слои по высоте своих дорожек */
   textLayers?: TextLayerInput[]
+  /** запасной декодер AV1 (ffmpeg без libdav1d): им читаются видео с кодеком av1, остальные — как обычно */
+  av1Decoder?: string
 }
 
 export interface ExportCommand {
@@ -173,7 +175,7 @@ export function buildExport(p: Project, o: GraphOpts, outPath: string): ExportCo
     const k = inputCount++
     // вход режется по файлу (секунды исходника); скорость применяется фильтрами ниже
     // стоп-кадр берёт из файла один кадр с секунды in
-    inputs.push('-ss', f3(it.in), '-t', it.kind === 'freeze' ? '0.5' : f3(it.out - it.in), '-i', m.path)
+    inputs.push('-ss', f3(it.in), '-t', it.kind === 'freeze' ? '0.5' : f3(it.out - it.in), ...(useV && o.av1Decoder && m.videoCodec === 'av1' ? ['-c:v', o.av1Decoder] : []), '-i', m.path)
     const s = f3(it.start)
     const e = f3(itemEnd(it))
     if (useV) {

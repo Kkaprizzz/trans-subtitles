@@ -159,6 +159,8 @@ type Drag =
   | { kind: 'clip-move'; id: string; p0: Project; x0: number; moved: boolean }
   | { kind: 'clip-trim'; id: string; edge: 'start' | 'end'; p0: Project; moved: boolean }
   | { kind: 'scrub' }
+  /** рамка выделения от пустого места: t0 (время) и y0 (по содержимому) — угол, с которого начали; cx/cy — точка нажатия на экране */
+  | { kind: 'marquee'; t0: number; y0: number; cx: number; cy: number; moved: boolean; add: boolean; base: string[]; before: string[] }
 
 const Svg = ({ d, size = 14 }: { d: string; size?: number }): React.JSX.Element => (
   <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
@@ -371,6 +373,10 @@ function Tracks(p: Props): React.JSX.Element {
   const [ghost, setGhost] = useState<{ id: string; trackId: string; start: number; top: number; height: number } | null>(null)
   const [fxOver, setFxOver] = useState<string | null>(null)
   const [dropPrev, setDropPrev] = useState<DropPrev | null>(null)
+  // вертикальная прокрутка дорожек (пикселей) и рамка выделения (углы: время и y по содержимому)
+  const [scrollY, setScrollY] = useState(0)
+  const [marquee, setMarquee] = useState<{ t0: number; y0: number; t1: number; y1: number } | null>(null)
+  const ptrRef = useRef<{ x: number; by: number } | null>(null)
   type Menu =
     | { kind: 'lane'; x: number; y: number; trackId: string; t: number }
     | { kind: 'item'; x: number; y: number; itemId: string; t: number }
@@ -417,7 +423,7 @@ function Tracks(p: Props): React.JSX.Element {
     const M = 8
     // точка щелчка в координатах окна; меню у позиционирования fixed
     const cx = r.left + menu.x
-    const cy = r.top + menu.y
+    const cy = r.top + menu.y - (menu.y >= RULER ? sy : 0)
     const left = Math.max(M, Math.min(cx, window.innerWidth - mw - M))
     const top = Math.max(M, Math.min(cy, window.innerHeight - mh - M))
     setMenuPos({ left, top, ready: true })
@@ -433,6 +439,9 @@ function Tracks(p: Props): React.JSX.Element {
     () => (dropPrev ? layout(dropPrev.pp.tracks, hasClips) : baseLayout),
     [dropPrev?.key, baseLayout, hasClips] // eslint-disable-line react-hooks/exhaustive-deps
   )
+  // дорожки прокручиваются по вертикали: линейка стоит на месте, всё остальное сдвигается на sy
+  const maxY = Math.max(0, bottom + 8 - h)
+  const sy = Math.min(scrollY, maxY)
   const wordsByItem = useMemo(() => {
     const m = new Map<string, TlWord[]>()
     for (const wd of p.words) m.set(wd.itemId, [...(m.get(wd.itemId) ?? []), wd])
@@ -527,7 +536,9 @@ function Tracks(p: Props): React.JSX.Element {
   // --- ввод ---
   const local = (e: { clientX: number; clientY: number }): { x: number; y: number } => {
     const r = boxRef.current?.getBoundingClientRect()
-    return { x: e.clientX - (r?.left ?? 0), y: e.clientY - (r?.top ?? 0) }
+    const y = e.clientY - (r?.top ?? 0)
+    // ниже линейки возвращаем y по содержимому: с учётом вертикальной прокрутки
+    return { x: e.clientX - (r?.left ?? 0), y: y < RULER ? y : y + sy }
   }
   const tol = SNAP_PX / view.pps
   const rowAt = (y: number): Row | 'above' | 'below' | 'clips' | null => {
@@ -575,7 +586,11 @@ function Tracks(p: Props): React.JSX.Element {
 
   const onWheel = (e: React.WheelEvent): void => {
     if (e.ctrlKey || e.metaKey) setView((v) => clampView(zoomAt(v, Math.exp(-e.deltaY * 0.0015), local(e).x, minPps, MAX_PPS)))
-    else {
+    else if (e.shiftKey) {
+      // Shift+колесо — по вертикали (Chromium при Shift присылает прокрутку в deltaX)
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+      setScrollY((v) => Math.max(0, Math.min(maxY, Math.min(v, maxY) + d)))
+    } else {
       const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
       setView((v) => clampView({ ...v, start: v.start + d / v.pps }))
     }
@@ -585,16 +600,80 @@ function Tracks(p: Props): React.JSX.Element {
     if (e.button !== 0) return
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     const { x, y } = local(e)
-    dragRef.current = { kind: 'scrub' }
-    if (y >= RULER) {
-      p.onSelect([])
-      p.onSelectClip(null)
-      const r = rowAt(y)
-      p.onSelectTrack(r && typeof r === 'object' ? r.track.id : null)
-    }
     p.onMarkerPop(null)
-    p.onSeek(Math.max(0, xToTime(x, view)))
+    if (y < RULER) {
+      // линейка: курсор встаёт в точку и едет за мышью
+      dragRef.current = { kind: 'scrub' }
+      p.onSeek(Math.max(0, xToTime(x, view)))
+      return
+    }
+    // пустое место дорожек: щелчок снимает выделение и ставит курсор (как раньше), протяжка рисует рамку выделения
+    const add = e.ctrlKey || e.metaKey || e.shiftKey
+    dragRef.current = { kind: 'marquee', t0: xToTime(x, view), y0: y, cx: e.clientX, cy: e.clientY, moved: false, add, base: add ? p.selected : [], before: p.selected }
+    const r = rowAt(y)
+    p.onSelectTrack(r && typeof r === 'object' ? r.track.id : null)
   }
+
+  /** Куски, которых касается рамка (закреплённые дорожки пропускаем). */
+  const marqueeHits = (m: { t0: number; y0: number; t1: number; y1: number }): string[] => {
+    const ta = Math.min(m.t0, m.t1)
+    const tb = Math.max(m.t0, m.t1)
+    const ya = Math.min(m.y0, m.y1)
+    const yb = Math.max(m.y0, m.y1)
+    const ids: string[] = []
+    for (const it of p.project.items) {
+      const row = baseLayout.rows.find((r) => r.track.id === it.trackId)
+      if (!row || row.track.locked) continue
+      if (it.start <= tb && itemEnd(it) >= ta && row.top <= yb && row.top + row.h >= ya) ids.push(it.id)
+    }
+    return ids
+  }
+  /** Рамка тянется до точки указателя (она хранится как x и y окна): выделение обновляется на ходу. */
+  const dragMarquee = (): void => {
+    const d = dragRef.current
+    const pt = ptrRef.current
+    if (!d || d.kind !== 'marquee' || !d.moved || !pt) return
+    const m = { t0: d.t0, y0: d.y0, t1: Math.max(0, xToTime(pt.x, view)), y1: pt.by < RULER ? RULER : pt.by + sy }
+    setMarquee(m)
+    const hit = marqueeHits(m)
+    const next = d.add ? [...new Set([...d.base, ...hit])] : hit
+    if (next.length !== p.selected.length || next.some((id, i) => id !== p.selected[i])) p.onSelect(next)
+  }
+  const endMarquee = (restore: boolean): void => {
+    const d = dragRef.current
+    if (d?.kind === 'marquee' && restore) p.onSelect(d.before)
+    dragRef.current = null
+    ptrRef.current = null
+    setMarquee(null)
+  }
+  // Esc отменяет рамку: выделение возвращается к тому, что было
+  useEffect(() => {
+    if (!marquee) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.code === 'Escape') endMarquee(true)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [marquee !== null]) // eslint-disable-line react-hooks/exhaustive-deps
+  // у края таймлайна рамка сама прокручивает его (по горизонтали и по вертикали)
+  useEffect(() => {
+    if (!marquee) return
+    const EDGE = 28
+    const id = setInterval(() => {
+      const d = dragRef.current
+      const pt = ptrRef.current
+      if (!d || d.kind !== 'marquee' || !pt) return
+      const dx = pt.x < EDGE ? pt.x - EDGE : pt.x > w - EDGE ? pt.x - (w - EDGE) : 0
+      const dy = pt.by < RULER + EDGE ? pt.by - (RULER + EDGE) : pt.by > h - EDGE ? pt.by - (h - EDGE) : 0
+      if (dx) setView((v) => clampView({ ...v, start: v.start + (dx * 0.6) / v.pps }))
+      if (dy) setScrollY((v) => Math.max(0, Math.min(maxY, Math.min(v, maxY) + dy * 0.6)))
+    }, 16)
+    return () => clearInterval(id)
+  }, [marquee !== null, w, h, maxY]) // eslint-disable-line react-hooks/exhaustive-deps
+  // после прокрутки под неподвижным указателем другое время и другая строка: пересчитываем рамку
+  useEffect(() => {
+    dragMarquee()
+  }, [view.start, view.pps, sy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const onContext = (e: React.MouseEvent): void => {
     e.preventDefault()
@@ -779,6 +858,17 @@ function Tracks(p: Props): React.JSX.Element {
       p.onSeek(Math.max(0, xToTime(x, view)))
       return
     }
+    if (d.kind === 'marquee') {
+      if (!d.moved && Math.hypot(e.clientX - d.cx, e.clientY - d.cy) < 4) return
+      if (!d.moved) {
+        d.moved = true
+        p.onSelectClip(null)
+      }
+      const r = boxRef.current?.getBoundingClientRect()
+      ptrRef.current = { x, by: e.clientY - (r?.top ?? 0) }
+      dragMarquee()
+      return
+    }
     if (d.kind === 'marker') {
       if (!d.moved && Math.abs(x - d.x0) < 3) return
       d.moved = true
@@ -877,6 +967,18 @@ function Tracks(p: Props): React.JSX.Element {
 
   const onUp = (): void => {
     const d = dragRef.current
+    if (d?.kind === 'marquee') {
+      // без протяжки это щелчок по пустому месту: снимает выделение (Ctrl/Shift — нет) и ставит курсор
+      if (!d.moved) {
+        if (!d.add) {
+          p.onSelect([])
+          p.onSelectClip(null)
+        }
+        p.onSeek(Math.max(0, d.t0))
+      }
+      endMarquee(false)
+      return
+    }
     dragRef.current = null
     if (d?.kind === 'move' && d.moved && ghost) p.onCommit(moveItem(d.p0, d.id, ghost.trackId, ghost.start))
     // щелчок по метке без перетаскивания открывает её окошко
@@ -984,6 +1086,8 @@ function Tracks(p: Props): React.JSX.Element {
       }} onDrop={onDrop}>
       <div className="tr-heads" style={{ width: HEAD }}>
         <div className="tr-head-ruler" style={{ height: RULER }} />
+        <div className="tr-heads-view" style={{ top: RULER }}>
+        <div className="tr-heads-content" style={{ top: -RULER, height: bottom, transform: `translateY(${-sy}px)` }}>
         {clipsTop !== null && (
           <div className="tr-head clips" style={{ top: clipsTop, height: H_CLIPS }}>
             <span className="tr-name">Клипы</span>
@@ -1025,7 +1129,10 @@ function Tracks(p: Props): React.JSX.Element {
             </div>
           )
         })}
+        </div>
+        </div>
       </div>
+      <div className="tr-wrap">
       <div
         className="tr-body"
         ref={boxRef}
@@ -1037,6 +1144,8 @@ function Tracks(p: Props): React.JSX.Element {
         onContextMenu={onContext}
       >
         <canvas ref={rulerRef} className="tr-ruler" style={{ width: w, height: RULER }} />
+        <div className="tr-viewport" style={{ top: RULER }}>
+        <div className="tr-content" style={{ top: -RULER, height: bottom, transform: `translateY(${-sy}px)` }}>
         {rows.map((r) => (
           <div key={r.track.id} className={`tr-lane${r.track.hidden ? ' hidden' : ''}${p.selectedTrack === r.track.id ? ' sel' : ''}`} style={{ top: r.top, height: r.h }} />
         ))}
@@ -1226,12 +1335,6 @@ function Tracks(p: Props): React.JSX.Element {
               </>
             )
           })()}
-        {playX >= -1 && playX <= w + 1 && (
-          <div className="tr-playhead" style={{ left: Math.round(playX), height: Math.max(h, bottom) }}>
-            <span />
-          </div>
-        )}
-        {p.project.items.length === 0 && <p className="tr-empty">Перетащи сюда видео или звук из «Медиа»</p>}
         {popMarker && popRow && (
           <MarkerPop
             key={popMarker.id}
@@ -1247,6 +1350,20 @@ function Tracks(p: Props): React.JSX.Element {
             onClose={() => p.onMarkerPop(null)}
           />
         )}
+        {marquee && (
+          <div
+            className="tr-marquee"
+            style={{ left: timeToX(Math.min(marquee.t0, marquee.t1), view), width: Math.abs(marquee.t1 - marquee.t0) * view.pps, top: Math.min(marquee.y0, marquee.y1), height: Math.abs(marquee.y1 - marquee.y0) }}
+          />
+        )}
+        </div>
+        </div>
+        {playX >= -1 && playX <= w + 1 && (
+          <div className="tr-playhead" style={{ left: Math.round(playX), height: h }}>
+            <span />
+          </div>
+        )}
+        {p.project.items.length === 0 && <p className="tr-empty">Перетащи сюда видео или звук из «Медиа»</p>}
         {menu && (
           <div ref={menuRef} className="ctx" style={{ left: menuPos.left, top: menuPos.top, visibility: menuPos.ready ? 'visible' : 'hidden' }} onPointerDown={(e) => e.stopPropagation()} role="menu">
             {menuEntries(menu).map((en) => (
@@ -1266,6 +1383,63 @@ function Tracks(p: Props): React.JSX.Element {
           </div>
         )}
       </div>
+      <Scrollbar
+        dir="v"
+        total={Math.max(1, bottom + 8 - RULER)}
+        size={Math.max(1, h - RULER)}
+        pos={sy}
+        onPos={(v) => setScrollY(Math.max(0, Math.min(maxY, v)))}
+        style={{ marginTop: RULER }}
+        label="Прокрутка дорожек по вертикали"
+      />
+      <Scrollbar dir="h" total={span} size={w / view.pps} pos={view.start} onPos={(v) => setView((vw) => clampView({ ...vw, start: v }))} label="Прокрутка таймлайна по горизонтали" />
+      </div>
+    </div>
+  )
+}
+
+/** Полоса прокрутки: ползунок тянется мышью, щелчок по полосе ставит ползунок в это место. total — вся длина, size — видимая часть, pos — смещение. */
+function Scrollbar(p: { dir: 'h' | 'v'; total: number; size: number; pos: number; onPos(v: number): void; style?: React.CSSProperties; label: string }): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null)
+  const drag = useRef<{ from: number; pos: number } | null>(null)
+  const vertical = p.dir === 'v'
+  const max = Math.max(0, p.total - p.size)
+  const trackLen = (): number => (vertical ? ref.current?.clientHeight : ref.current?.clientWidth) ?? 1
+  const thumb = vertical ? { top: `${(Math.min(p.pos, max) / p.total) * 100}%`, height: `${Math.min(1, p.size / p.total) * 100}%` } : { left: `${(Math.min(p.pos, max) / p.total) * 100}%`, width: `${Math.min(1, p.size / p.total) * 100}%` }
+  return (
+    <div
+      ref={ref}
+      className={`tr-sb ${p.dir}${max <= 0 ? ' idle' : ''}`}
+      style={p.style}
+      role="scrollbar"
+      aria-orientation={vertical ? 'vertical' : 'horizontal'}
+      aria-label={p.label}
+      aria-valuemin={0}
+      aria-valuemax={Math.round(max)}
+      aria-valuenow={Math.round(Math.min(p.pos, max))}
+      onPointerDown={(e) => {
+        if (e.target !== e.currentTarget || max <= 0) return
+        const r = e.currentTarget.getBoundingClientRect()
+        const f = vertical ? (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width
+        p.onPos(Math.max(0, Math.min(max, f * p.total - p.size / 2)))
+      }}
+    >
+      <div
+        className="tr-sb-thumb"
+        style={thumb}
+        onPointerDown={(e) => {
+          e.stopPropagation()
+          e.currentTarget.setPointerCapture(e.pointerId)
+          drag.current = { from: vertical ? e.clientY : e.clientX, pos: Math.min(p.pos, max) }
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current
+          if (!d) return
+          p.onPos(Math.max(0, Math.min(max, d.pos + (((vertical ? e.clientY : e.clientX) - d.from) / trackLen()) * p.total)))
+        }}
+        onPointerUp={() => (drag.current = null)}
+        onPointerCancel={() => (drag.current = null)}
+      />
     </div>
   )
 }
