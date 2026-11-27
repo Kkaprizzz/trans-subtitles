@@ -3,7 +3,7 @@
  * Проект — в истории с отменой/повтором, автосохранение через 0.6 с после правки.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { fmtTime } from '../format'
+import { fmtTime, plural } from '../format'
 import { addEffect, applyFaceTrack, canHaveEffects, copyItems, dropOnTimeline, duplicateItems, hasFrameCrop, insertFreeze, insertText, joinSelected, pasteItems, patchPlate, patchShape, setPropAt, toggleFlip, type ClipEntry, type DropSpec } from '../../../shared/mix'
 import { hasKeys } from '../../../shared/anim'
 import type { ShapeKind } from '../../../shared/shape'
@@ -22,6 +22,7 @@ import {
   addTrackOf,
   applyRecognized,
   deleteItems,
+  deleteTracks,
   deleteTlWord,
   editTlText,
   insertMedia,
@@ -246,7 +247,9 @@ export default function Editor(p: Props): React.JSX.Element {
   const [subsTab, setSubsTab] = useState<SubsTab>('words')
   const [wordSel, setWordSel] = useState(-1)
   const [editWord, setEditWord] = useState<TlWord | null>(null)
-  const [selectedTrack, setSelectedTrack] = useState<string | null>(null)
+  // выбранные дорожки: щелчок по шапке — одна, Ctrl/Shift — несколько; последняя главная (метка, вставка)
+  const [selectedTracks, setSelectedTracks] = useState<string[]>([])
+  const selectedTrack = selectedTracks[selectedTracks.length - 1] ?? null
   const [markerPopId, setMarkerPopId] = useState<string | null>(null)
   const [asrBusy, setAsrBusy] = useState(false)
   // «Нарезка»: выбранная рамка, фокус на рамке, окошко и ход работы
@@ -604,6 +607,17 @@ export default function Editor(p: Props): React.JSX.Element {
   const split = useCallback(() => {
     commit(splitAt(projectRef.current, time, selected.length ? selected : undefined))
   }, [commit, time, selected])
+  /** Delete при выбранных дорожках и невыбранных кусках: дорожки уходят вместе с кусками (спрашиваем, если куски есть). */
+  const delTracks = useCallback((): void => {
+    const pr = projectRef.current
+    const ids = selectedTracks.filter((id) => pr.tracks.some((t) => t.id === id && !t.locked))
+    if (ids.length === 0) return
+    const n = pr.items.filter((i) => ids.includes(i.trackId)).length
+    if (n > 0 && !window.confirm(`Удалить ${ids.length} ${plural(ids.length, 'дорожку', 'дорожки', 'дорожек')} вместе с кусками (${n})?`)) return
+    commit(deleteTracks(pr, ids))
+    setSelectedTracks([])
+    setSelected([])
+  }, [commit, selectedTracks])
   const del = useCallback(
     (ripple = false) => {
       if (selected.length === 0) return
@@ -763,6 +777,10 @@ export default function Editor(p: Props): React.JSX.Element {
   useEffect(() => {
     setSelected((s) => (s.every((id) => project.items.some((i) => i.id === id)) ? s : s.filter((id) => project.items.some((i) => i.id === id))))
   }, [project.items])
+  // дорожки пропали (отмена, удаление) — из выбора они тоже уходят
+  useEffect(() => {
+    setSelectedTracks((s) => (s.every((id) => project.tracks.some((t) => t.id === id)) ? s : s.filter((id) => project.tracks.some((t) => t.id === id))))
+  }, [project.tracks])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -843,6 +861,7 @@ export default function Editor(p: Props): React.JSX.Element {
         e.preventDefault()
         // рамка выбрана, а кусков нет — удаляем рамку
         if (selectedClip && selected.length === 0) commit(deleteClip(projectRef.current, selectedClip))
+        else if (selected.length === 0 && selectedTracks.length > 0) delTracks()
         else del(e.shiftKey)
       } else if (e.code === 'Escape') {
         if (markerPopId) setMarkerPopId(null)
@@ -1488,13 +1507,14 @@ export default function Editor(p: Props): React.JSX.Element {
           time={time}
           playing={playing}
           selected={selected}
-          selectedTrack={selectedTrack}
+          selectedTracks={selectedTracks}
           peaks={peaks}
           words={tlWords}
           selectedWord={selectedWordRef}
           onSeek={seek}
           onSelect={selectItems}
-          onSelectTrack={setSelectedTrack}
+          onSelectTrack={(id) => setSelectedTracks(id ? [id] : [])}
+          onToggleTrack={(id) => setSelectedTracks((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))}
           onCommit={commit}
           onDropMedia={onDropMedia}
           previewDrop={previewDrop}

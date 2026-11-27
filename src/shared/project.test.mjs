@@ -11,6 +11,7 @@ import {
   audioTracks,
   deleteItems,
   deleteMarker,
+  deleteTracks,
   deleteTlWord,
   editTlText,
   fits,
@@ -472,5 +473,41 @@ assert.deepEqual(broken.items.map((i) => i.id), ['i1'], 'битые куски �
 assert.ok(broken.tracks.some((t) => t.kind === 'audio'), 'звуковая дорожка добавлена')
 assert.deepEqual(broken.markers.map((m) => [m.id, m.color]), [['k1', 5]], 'битые метки выброшены, цвет ограничен')
 assert.deepEqual(broken.words.m1.map((w) => w.text), ['а'])
+
+// --- удаление дорожек вместе с кусками
+{
+  const V = (path, duration) => ({ path, name: path, duration, hasVideo: true, hasAudio: true, width: 1280, height: 720, fps: 25, needsPreview: false })
+  let p = newProject('dt')
+  const a = addMedia(p, V('/a.mp4', 10))
+  const b = addMedia(a.p, V('/b.mp4', 4))
+  p = insertMedia(b.p, a.id, 0).p
+  const lowest = p.items[0].trackId
+  p = insertMedia(p, b.id, 2).p // занято — уходит на другую дорожку выше
+  const upper = p.items[1].trackId
+  assert.notEqual(upper, lowest)
+  p = addMarker(p, upper, 3, 0, '').p
+  const videos = p.tracks.filter((t) => t.kind === 'video').length
+  // одна выбранная дорожка с куском: исчезает вместе с куском и меткой, другая цела
+  const one = deleteTracks(p, [upper])
+  assert.equal(one.tracks.some((t) => t.id === upper), false, 'дорожка удалена')
+  assert.equal(one.items.some((i) => i.trackId === upper), false, 'куски дорожки ушли')
+  assert.equal(one.markers.length, 0, 'метки дорожки ушли')
+  assert.equal(one.items.filter((i) => i.trackId === lowest).length, 1, 'чужая дорожка не тронута')
+  assert.equal(one.tracks.filter((t) => t.kind === 'video').length, videos - 1)
+  // все видеодорожки выбраны: самая нижняя остаётся пустой (одна видео- и одна звуковая дорожки есть всегда)
+  const all = deleteTracks(p, p.tracks.filter((t) => t.kind === 'video').map((t) => t.id))
+  assert.equal(all.tracks.filter((t) => t.kind === 'video').length, 1, 'видеодорожка остаётся одна')
+  assert.equal(all.tracks.filter((t) => t.kind === 'video')[0].id, lowest, 'остаётся самая нижняя')
+  assert.equal(all.items.length, 0, 'куски со всех выбранных дорожек ушли')
+  // закреплённая дорожка не удаляется
+  const locked = setTrack(p, upper, { locked: true })
+  assert.equal(deleteTracks(locked, [upper]), locked, 'закреплённая дорожка не трогается')
+  // несуществующая дорожка — проект как был
+  assert.equal(deleteTracks(p, ['нет']), p)
+  // связанные субтитры уходят вместе с видеокуском
+  const sub = { ...p.items[1], id: 'sub1', kind: 'subs', link: p.items[1].id, trackId: lowest }
+  const withSubs = { ...p, items: [...p.items, sub] }
+  assert.equal(deleteTracks(withSubs, [upper]).items.some((i) => i.id === 'sub1'), false, 'субтитры связанного куска ушли')
+}
 
 console.log('project.ts: все проверки прошли')

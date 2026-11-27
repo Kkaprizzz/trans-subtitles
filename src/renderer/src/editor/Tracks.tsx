@@ -57,7 +57,8 @@ interface Props {
   time: number
   playing: boolean
   selected: string[]
-  selectedTrack: string | null
+  /** выбранные дорожки; последняя — «главная» (метка и вставка идут на неё) */
+  selectedTracks: string[]
   peaks: Record<string, Peaks>
   /** слова субтитров на таймлайне (для рисования слов внутри кусков) */
   words: TlWord[]
@@ -66,6 +67,8 @@ interface Props {
   onSeek(t: number): void
   onSelect(ids: string[]): void
   onSelectTrack(id: string | null): void
+  /** Ctrl/Shift + щелчок по шапке: добавить дорожку к выбранным или убрать */
+  onToggleTrack(id: string): void
   onCommit(next: Project, key?: string): void
   onDropMedia(mediaId: string, trackId: string | null, at: number): void
   /** бросили баннер из библиотеки / фигуру: id и вид из карточки, дорожка (null — как придётся), время */
@@ -1058,8 +1061,11 @@ function Tracks(p: Props): React.JSX.Element {
     else p.onDropShape(shapeKind, track, at)
   }
 
-  const setTrack = (t: Track, patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): void =>
-    p.onCommit({ ...p.project, tracks: p.project.tracks.map((x) => (x.id === t.id ? { ...x, ...patch } : x)) })
+  // значки заглушить / скрыть / закрепить действуют сразу на все выбранные дорожки, если нажали на значок выбранной
+  const setTrack = (t: Track, patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): void => {
+    const ids = p.selectedTracks.includes(t.id) ? p.selectedTracks : [t.id]
+    p.onCommit({ ...p.project, tracks: p.project.tracks.map((x) => (ids.includes(x.id) && (patch.hidden === undefined || x.kind === 'video') ? { ...x, ...patch } : x)) })
+  }
   const canRemove = (t: Track): boolean =>
     !p.project.items.some((i) => i.trackId === t.id) && p.project.tracks.filter((x) => x.kind === t.kind).length > 1
   const removeTrack = (t: Track): void =>
@@ -1100,9 +1106,14 @@ function Tracks(p: Props): React.JSX.Element {
           return (
             <div
               key={t.id}
-              className={`tr-head${p.selectedTrack === t.id ? ' sel' : ''}${t.locked ? ' locked' : ''}`}
+              className={`tr-head${p.selectedTracks.includes(t.id) ? ' sel' : ''}${t.locked ? ' locked' : ''}`}
               style={{ top: r.top, height: r.h }}
-              onPointerDown={() => p.onSelectTrack(t.id)}
+              onPointerDown={(e) => {
+                // значки на шапке выбор не меняют: иначе нажатие на «заглушить» у выбранной дорожки сбросило бы остальные
+                if ((e.target as HTMLElement).closest('button')) return
+                if (e.ctrlKey || e.metaKey || e.shiftKey) p.onToggleTrack(t.id)
+                else p.onSelectTrack(t.id)
+              }}
             >
               <span className="tr-name">{trackName(dropPrev ? dropPrev.pp : p.project, t.id)}</span>
               <span className="tr-tools">
@@ -1147,7 +1158,7 @@ function Tracks(p: Props): React.JSX.Element {
         <div className="tr-viewport" style={{ top: RULER }}>
         <div className="tr-content" style={{ top: -RULER, height: bottom, transform: `translateY(${-sy}px)` }}>
         {rows.map((r) => (
-          <div key={r.track.id} className={`tr-lane${r.track.hidden ? ' hidden' : ''}${p.selectedTrack === r.track.id ? ' sel' : ''}`} style={{ top: r.top, height: r.h }} />
+          <div key={r.track.id} className={`tr-lane${r.track.hidden ? ' hidden' : ''}${p.selectedTracks.includes(r.track.id) ? ' sel' : ''}`} style={{ top: r.top, height: r.h }} />
         ))}
         {clipsTop !== null && <div className="tr-lane clips" style={{ top: clipsTop, height: H_CLIPS }} />}
         {clipsTop !== null &&

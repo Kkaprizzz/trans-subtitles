@@ -274,6 +274,34 @@ export function removeTrack(p: Project, id: string): Project {
   return { ...p, tracks: p.tracks.filter((x) => x.id !== id), markers: p.markers.filter((m) => m.trackId !== id) }
 }
 
+/**
+ * Удаляет дорожки вместе с их кусками (и связанными субтитрами) и метками. Закреплённые дорожки не трогаем. Одна видео- и одна
+ * звуковая дорожки остаются всегда: если выбраны все дорожки вида, самая нижняя из них не исчезает, а очищается.
+ */
+export function deleteTracks(p: Project, ids: string[]): Project {
+  const want = new Set(ids.filter((id) => {
+    const t = trackOf(p, id)
+    return !!t && !t.locked
+  }))
+  if (want.size === 0) return p
+  const drop = new Set<string>()
+  for (const kind of ['video', 'audio'] as const) {
+    const list = p.tracks.filter((t) => t.kind === kind)
+    const picked = list.filter((t) => want.has(t.id))
+    if (picked.length === 0) continue
+    const keep = picked.length === list.length ? (kind === 'video' ? list[list.length - 1] : list[0]) : undefined
+    for (const t of picked) if (t !== keep) drop.add(t.id)
+  }
+  const gone = new Set(p.items.filter((i) => want.has(i.trackId)).map((i) => i.id))
+  for (const s of p.items) if (s.kind === 'subs' && s.link && gone.has(s.link)) gone.add(s.id)
+  return finish({
+    ...p,
+    tracks: p.tracks.filter((t) => !drop.has(t.id)),
+    items: p.items.filter((i) => !gone.has(i.id) && !drop.has(i.trackId)),
+    markers: p.markers.filter((m) => !want.has(m.trackId))
+  })
+}
+
 export function setTrack(p: Project, id: string, patch: Partial<Pick<Track, 'muted' | 'hidden' | 'locked'>>): Project {
   return { ...p, tracks: p.tracks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }
 }
