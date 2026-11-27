@@ -14,7 +14,7 @@ import { gainAt } from '../../../shared/audio'
 import { EFFECT_MIME, EFFECTS, type EffectType } from '../../../shared/effects'
 import { plateLabel } from '../../../shared/plate'
 import { shapeLabel } from '../../../shared/shape'
-import { addGainPoint, addKeysAtTime, attachAudio, canHaveEffects, canJoin, deleteGainPoint, deleteKeysAtTime, detachAudio, hasSound, insertFreeze, joinWithNeighbor, keyTimes, moveGainPoint, moveKeysAtTime, setBaseVolume, setEaseAtTime, setFreezeLength, toggleFlip } from '../../../shared/mix'
+import { itemGainAt, addGainPoint, addKeysAtTime, attachAudio, canHaveEffects, canJoin, deleteGainPoint, deleteKeysAtTime, detachAudio, hasSound, insertFreeze, joinWithNeighbor, keyTimes, moveGainPoint, moveKeysAtTime, setBaseVolume, setEaseAtTime, setFreezeLength, toggleFlip } from '../../../shared/mix'
 import { moveClipBy, rulerStep, setClipEdge, snapToWords, sourceAt, timeToX, xToTime, zoomAt, type Placement, type TimelineView } from '../../../shared/cut'
 import {
   MARKER_COLORS,
@@ -380,6 +380,8 @@ function Tracks(p: Props): React.JSX.Element {
   const [scrollY, setScrollY] = useState(0)
   const [marquee, setMarquee] = useState<{ t0: number; y0: number; t1: number; y1: number } | null>(null)
   const ptrRef = useRef<{ x: number; by: number } | null>(null)
+  // процент рядом с мышью, пока тянут линию или точку громкости (координаты тела таймлайна)
+  const [gainTip, setGainTip] = useState<{ x: number; y: number; text: string } | null>(null)
   type Menu =
     | { kind: 'lane'; x: number; y: number; trackId: string; t: number }
     | { kind: 'item'; x: number; y: number; itemId: string; t: number }
@@ -853,6 +855,12 @@ function Tracks(p: Props): React.JSX.Element {
     dragRef.current = { kind: 'marker', id: m.id, x0: local(e).x, moved: false }
   }
 
+  /** Процент уровня рядом с мышью: тот же расчёт, что у линии (0..100 %). */
+  const showGainTip = (e: React.PointerEvent, y: number, top: number, h: number): void => {
+    const v = Math.min(1, Math.max(0, 1 - (y - top - GAIN_PAD) / (h - 2 * GAIN_PAD)))
+    const r = boxRef.current?.getBoundingClientRect()
+    setGainTip({ x: e.clientX - (r?.left ?? 0) + 14, y: e.clientY - (r?.top ?? 0) - 30, text: `${Math.round(v * 100)}%` })
+  }
   const onMove = (e: React.PointerEvent): void => {
     const d = dragRef.current
     if (!d) return
@@ -881,6 +889,7 @@ function Tracks(p: Props): React.JSX.Element {
     }
     if (d.kind === 'gain-base') {
       p.onCommit(setBaseVolume(d.p0, d.id, 1 - (y - d.top - GAIN_PAD) / (d.h - 2 * GAIN_PAD)), `gb-${d.id}`)
+      showGainTip(e, y, d.top, d.h)
       return
     }
     if (d.kind === 'key') {
@@ -902,6 +911,7 @@ function Tracks(p: Props): React.JSX.Element {
       // точки липнут к краям куска и курсору (Alt — свободно)
       if (!e.altKey) t = snapTo(t, [it.start, itemEnd(it), p.time], tol)
       p.onCommit(moveGainPoint(d.p0, d.id, d.idx, t, 1 - (y - d.top - GAIN_PAD) / (d.h - 2 * GAIN_PAD)), `gp-${d.id}-${d.idx}`)
+      showGainTip(e, y, d.top, d.h)
       return
     }
     if (d.kind === 'clip-move') {
@@ -970,6 +980,7 @@ function Tracks(p: Props): React.JSX.Element {
 
   const onUp = (): void => {
     const d = dragRef.current
+    setGainTip(null)
     if (d?.kind === 'marquee') {
       // без протяжки это щелчок по пустому месту: снимает выделение (Ctrl/Shift — нет) и ставит курсор
       if (!d.moved) {
@@ -1066,6 +1077,11 @@ function Tracks(p: Props): React.JSX.Element {
     const ids = p.selectedTracks.includes(t.id) ? p.selectedTracks : [t.id]
     p.onCommit({ ...p.project, tracks: p.project.tracks.map((x) => (ids.includes(x.id) && (patch.hidden === undefined || x.kind === 'video') ? { ...x, ...patch } : x)) })
   }
+  /** Громкость дорожки в месте курсора: уровень линии громкости куска под курсором («—», если под курсором на дорожке нет звука). */
+  const volAt = (t: Track): string => {
+    const it = p.project.items.find((i) => i.trackId === t.id && i.kind === 'media' && p.time >= i.start - 1e-6 && p.time < itemEnd(i) && hasSound(p.project, i))
+    return it ? `${Math.round(itemGainAt(it, p.time) * 100)}%` : '—'
+  }
   const canRemove = (t: Track): boolean =>
     !p.project.items.some((i) => i.trackId === t.id) && p.project.tracks.filter((x) => x.kind === t.kind).length > 1
   const removeTrack = (t: Track): void =>
@@ -1115,7 +1131,12 @@ function Tracks(p: Props): React.JSX.Element {
                 else p.onSelectTrack(t.id)
               }}
             >
-              <span className="tr-name">{trackName(dropPrev ? dropPrev.pp : p.project, t.id)}</span>
+              <span className="tr-head-top">
+                <span className="tr-name">{trackName(dropPrev ? dropPrev.pp : p.project, t.id)}</span>
+                <span className={`tr-vol mono${t.muted ? ' off' : ''}`} title="Громкость в месте курсора">
+                  {volAt(t)}
+                </span>
+              </span>
               <span className="tr-tools">
                 <button onClick={() => addMarkerAt(t.id, p.time)} title="Поставить метку на курсоре (M)" aria-label="Добавить метку">
                   <Svg d={I.flag} />
@@ -1369,6 +1390,11 @@ function Tracks(p: Props): React.JSX.Element {
         )}
         </div>
         </div>
+        {gainTip && (
+          <div className="tr-gain-tip mono" style={{ left: gainTip.x, top: gainTip.y }}>
+            {gainTip.text}
+          </div>
+        )}
         {playX >= -1 && playX <= w + 1 && (
           <div className="tr-playhead" style={{ left: Math.round(playX), height: h }}>
             <span />
