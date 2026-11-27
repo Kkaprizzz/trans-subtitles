@@ -75,7 +75,12 @@ const SEED = (t, b) => ({ mode: 'seed', seed: { t, box: b } })
   near(faceAt(tr, 5), 0.3, 'до ухода стоит', 0.01); near(faceAt(tr, 7.5), 0.3, 'ещё стоит: лицо пока в пределах порога', 0.05)
   near(faceAt(tr, 12), 0.6, 'после ухода стоит на новом месте', 0.02)
   const pan = tr.filter((p) => p.t > 7 && p.t < 12)
-  assert.ok(pan.length === 2 && pan[1].t - pan[0].t <= 1.1 && pan[1].t - pan[0].t >= 0.45, 'переход короткий и плавный (0,5–1 с)')
+  assert.ok(pan.length === 2 && pan[1].t - pan[0].t <= 2.55 && pan[1].t - pan[0].t >= 1.15, `переход долгий и плавный (1,2–2,5 с): ${pan[1].t - pan[0].t}`)
+  // чем дальше сдвиг, тем дольше: малый (0,12 кадра) ≈ 1,5 с, средний (0,3) ≈ 2,1 с
+  const smallS = frames(0, 20, (t) => [box(0.3 + 0.12 * Math.min(1, Math.max(0, t - 8)))])
+  const small = buildTrack(smallS, SEED(2, box(0.3))).filter((p) => p.t > 7 && p.t < 14)
+  const dSmall = small[1].t - small[0].t
+  assert.ok(small.length === 2 && dSmall >= 1.2 && dSmall < pan[1].t - pan[0].t, `малый сдвиг короче среднего: ${dSmall} < ${pan[1].t - pan[0].t}`)
 }
 {
   // лицо пропало с 8 по 14 с: держим последнее положение, к центру НЕ уезжаем
@@ -140,9 +145,9 @@ const SEED = (t, b) => ({ mode: 'seed', seed: { t, box: b } })
   const tr = buildTrack({ samples: s, cuts: [], speech }, { mode: 'speaker' })
   near(faceAt(tr, 5), 0.25, 'говорит A — на нём', 0.02)
   near(faceAt(tr, 8), 0.25, 'и до смены', 0.02)
-  near(faceAt(tr, 14), 0.7, 'заговорил B — кадр на нём', 0.02)
-  const pan = tr.filter((p) => p.t > 9 && p.t < 14)
-  assert.ok(pan.length === 2 && pan[0].t >= 10 - 0.3 && pan[1].t <= 15.5, `смена говорящего — один короткий переход: ${JSON.stringify(pan)}`)
+  near(faceAt(tr, 16), 0.7, 'заговорил B — кадр на нём (переход 1,2–2,5 с после паузы на смену)', 0.02)
+  const pan = tr.filter((p) => p.t > 9 && p.t < 16)
+  assert.ok(pan.length === 2 && pan[0].t >= 10 - 0.3 && pan[1].t <= 15.6, `смена говорящего — один плавный переход: ${JSON.stringify(pan)}`)
 }
 {
   // односложные ответы B (1–1,5 с «да, конечно») не переключают кадр с A; а долгий ответ (4 с) — переключает
@@ -152,7 +157,7 @@ const SEED = (t, b) => ({ mode: 'seed', seed: { t, box: b } })
   const brokenAnswer = frames(0, 30, (t) => [box(0.25), box(0.7)].map((b, i) => ({ ...b, act: i === 0 ? 1 : (t >= 10 && t < 14 && Math.abs(((t - 10) % 1.5) - 0.75) > 0.3) || t >= 14 ? 9 : 1 })))
   assert.ok(buildTrack({ samples: brokenAnswer, cuts: [], speech: [[0, 30]] }, { mode: 'speaker' }).every((p) => p.x > 0.2), 'проверка набора')
   const long = buildTrack({ samples: ans(4), cuts: [], speech: [[0, 30]] }, { mode: 'speaker' })
-  near(faceAt(long, 13.8), 0.7, 'ответ B дольше 2,5 с — кадр перешёл на него', 0.02)
+  near(faceAt(long, 16.5), 0.7, 'ответ B дольше 2,5 с — кадр перешёл на него', 0.02)
   near(faceAt(long, 25), 0.25, 'A снова говорит долго — кадр вернулся', 0.02)
   const mid = buildTrack({ samples: ans(8), cuts: [], speech: [[0, 30]] }, { mode: 'speaker' })
   near(faceAt(mid, 16), 0.7, 'долгая речь B (8 с) — кадр на нём', 0.02)

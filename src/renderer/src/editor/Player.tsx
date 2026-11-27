@@ -311,6 +311,8 @@ function ShapeView(p: {
 
 const PRELOAD = 2
 const DRIFT = 0.25
+/** видео не выдаёт кадров дольше этого времени при идущем воспроизведении — считаем, что декодер завис (после перемотки в длинный файл звук уже идёт, а картинка стоит) */
+const STALL_MS = 1500
 
 type El = HTMLVideoElement | HTMLAudioElement
 
@@ -318,7 +320,7 @@ export default function Player(p: Props): React.JSX.Element {
   const stageRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef<HTMLDivElement>(null)
   const views = useRef(new Map<string, CaptionView>())
-  const pool = useRef(new Map<string, { el: El; src: string }>())
+  const pool = useRef(new Map<string, { el: El; src: string; lastFrame: number }>())
   const [box, setBox] = useState({ w: 0, h: 0 })
 
   const cv = p.clipView ?? null
@@ -399,8 +401,17 @@ export default function Player(p: Props): React.JSX.Element {
           el.className = 'pl-video'
         }
         frame.appendChild(el)
-        rec = { el, src: '' }
+        const made = { el, src: '', lastFrame: performance.now() }
+        rec = made
         pool.current.set(it.id, rec)
+        // отметка каждого показанного кадра: по ней сторож видит, что картинка встала
+        if (el instanceof HTMLVideoElement && 'requestVideoFrameCallback' in el) {
+          const tick = (): void => {
+            made.lastFrame = performance.now()
+            el.requestVideoFrameCallback(tick)
+          }
+          el.requestVideoFrameCallback(tick)
+        }
       }
       if (rec.src !== src) {
         rec.src = src
@@ -472,6 +483,26 @@ export default function Player(p: Props): React.JSX.Element {
     const h = setTimeout(paintBg, 90)
     return () => clearTimeout(h)
   }, [p.time, p.playing, p.project, p.previews, p.masterVolume, trackOrder, muted, hidden, frameH, cv?.mode, cv?.offsetX, cv?.mediaId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Сторож зависшей картинки: идёт воспроизведение, видео не paused и не перематывается, а кадров нет дольше STALL_MS — ставим
+  // декодер заново на текущую точку (повторная перемотка запускает его с ближайшего ключевого кадра)
+  useEffect(() => {
+    if (!p.playing) return
+    const since = performance.now()
+    for (const rec of pool.current.values()) rec.lastFrame = since
+    const id = setInterval(() => {
+      const now = performance.now()
+      for (const rec of pool.current.values()) {
+        const el = rec.el
+        if (!(el instanceof HTMLVideoElement) || el.paused || el.seeking || el.readyState < 2 || el.style.visibility === 'hidden') continue
+        if (now - Math.max(rec.lastFrame, since) > STALL_MS) {
+          rec.lastFrame = now
+          el.currentTime = el.currentTime
+        }
+      }
+    }, 500)
+    return () => clearInterval(id)
+  }, [p.playing])
 
   // Ушли с проекта — освобождаем все элементы.
   useEffect(() => {

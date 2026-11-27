@@ -296,9 +296,13 @@ interface PlateauPlan {
 
 /**
  * Спокойный кадр одного плана: положение лица по кадрам → медиана (убирает дрожь) → площадки. Кадр стоит на площадке и
- * сдвигается к новому положению коротким плавным переходом, только если лицо ушло больше порога и держится там.
+ * сдвигается к новому положению долгим плавным переходом (1,2–2,5 с), только если лицо ушло больше порога и держится там.
  * force[k] — в кадре k сменился человек (говорящий): двигаемся сразу.
  */
+/** Длительность перехода кадра к новому положению, с: от малого сдвига до сдвига через весь кадр. */
+const PAN_MIN = 1.2
+const PAN_MAX = 2.5
+
 function plateaus(xs: Array<number | null>, times: number[], force: boolean[], start: number, end: number, startX: number | null, o: TrackOpts): PlateauPlan {
   const n = xs.length
   // дыры закрываем: держим прежнее; до первой находки — первую; совсем нет — прежнее положение предыдущего плана или центр
@@ -330,7 +334,8 @@ function plateaus(xs: Array<number | null>, times: number[], force: boolean[], s
       if (settled || forced || devRun >= 12) {
         const newX = forced ? median(med.slice(k, Math.min(n, k + 3))) : median(tail)
         const dist = Math.abs(newX - curX)
-        const pan = Math.min(1, Math.max(0.5, 0.45 + dist * 1.5))
+        // переход долгий и мягкий (кривая — ease в faceAt и в ключах): короткий сдвиг ≈ 1,2 с, через весь кадр — 2,5 с
+        const pan = Math.min(PAN_MAX, Math.max(PAN_MIN, PAN_MIN + dist * 3))
         const panStart = Math.max(plateauStart, forced ? times[k] : times[devFrom])
         pts.push({ t: plateauStart, x: curX }, { t: panStart, x: curX })
         curX = newX

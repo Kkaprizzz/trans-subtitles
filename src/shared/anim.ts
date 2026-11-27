@@ -73,12 +73,13 @@ export function cleanKeys(raw: unknown): Keys {
 }
 
 /**
- * Кривые движения. Плавное движение (ключи «плавно», кадр трекинга) — ease-in-out кубическая: мягкий старт и мягкий финиш.
+ * Кривые движения. Плавное движение (ключи «плавно», кадр трекинга) — «smootherstep» (полином 5-й степени): очень мягкий старт
+ * и очень мягкий финиш, у краёв скорость и ускорение нулевые. Мягче кубической, поэтому сдвиг кадра глазу приятнее.
  * Входы анимаций (появление, зум, выезд) — ease-out: быстро стартуют и мягко садятся; выходы — ease-in: плавно разгоняются.
  */
 export const ease = (u: number): number => {
   const x = clamp(u, 0, 1)
-  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2
+  return x * x * x * (x * (6 * x - 15) + 10)
 }
 export const easeOut = (u: number): number => 1 - Math.pow(1 - clamp(u, 0, 1), 3)
 export const easeIn = (u: number): number => Math.pow(clamp(u, 0, 1), 3)
@@ -373,7 +374,7 @@ const f6 = (x: number): string => {
   return x < 0 ? `(${s})` : s
 }
 /** Те же кривые, что ease / easeOut / easeIn, выражениями ffmpeg (u — строка, уже зажатая в 0..1 или внутри отрезка). */
-const E = (u: string): string => `(if(lt(${u},0.5),4*(${u})*(${u})*(${u}),1-pow(2-2*(${u}),3)/2))`
+const E = (u: string): string => `((${u})*(${u})*(${u})*((${u})*(6*(${u})-15)+10))`
 const EOUT = (u: string): string => `(1-pow(1-(${u}),3))`
 const EIN = (u: string): string => `pow(${u},3)`
 const CL01 = (x: string): string => `clip(${x},0,1)`
