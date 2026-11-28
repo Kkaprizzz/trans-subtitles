@@ -5,7 +5,7 @@
  */
 import { shiftAll } from './project.ts'
 import { sliceEffects } from './anim.ts'
-import { isLayer, itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
+import { addSubtitles, insertMedia, isLayer, itemEnd, itemTrackKind, mediaOf, MIN_CLIP, MIN_ITEM, newProject, srcToTl, tlToSrc, uid, type Clip, type Framing, type Item, type Project } from './project.ts'
 import type { ClipCandidate } from './clips.ts'
 import type { SubtitleStyle } from './timeline.ts'
 import type { Word } from './types.ts'
@@ -94,6 +94,47 @@ export function placement(p: Project, c: Clip): Placement | null {
   const end = last.kind === 'freeze' ? itemEnd(last) : srcToTl(last, Math.min(last.out, c.end))
   const main = best.reduce((a, b) => (overlap(b) > overlap(a) ? b : a))
   return { start: r3(start), end: r3(Math.max(start, end)), itemId: main.id }
+}
+
+/**
+ * Рамка, у которой видео убрали с таймлайна, запоминает, где стояла, и остаётся там серой. Вызывается при каждой правке проекта
+ * (prev → next): запоминается место из prev, если в next у клипа места уже нет. Вернулось видео — память стирается.
+ * Если ничего не изменилось, возвращается тот же next.
+ */
+export function rememberPlaces(prev: Project, next: Project): Project {
+  if (next.clips.length === 0) return next
+  let changed = false
+  const clips = next.clips.map((c) => {
+    const now = placement(next, c)
+    if (now) {
+      if (c.lastAt) {
+        changed = true
+        return { ...c, lastAt: null }
+      }
+      return c
+    }
+    if (c.lastAt) return c
+    const before = prev.clips.find((x) => x.id === c.id)
+    const was = before ? placement(prev, before) : null
+    if (!was) return c
+    changed = true
+    return { ...c, lastAt: { start: was.start, end: was.end } }
+  })
+  return changed ? { ...next, clips } : next
+}
+
+/**
+ * Клип прямо из файла, когда видео убрано с таймлайна: свой маленький проект из диапазона клипа (видео со звуком) и, если у файла
+ * есть распознанные слова, субтитров. Размеры, стиль и слова — как у проекта. null — файла уже нет в проекте.
+ */
+export function clipSourceProject(p: Project, c: Clip): Project | null {
+  const m = mediaOf(p, c.mediaId)
+  if (!m) return null
+  const base: Project = { ...p, items: [], markers: [], clips: [], tracks: newProject(p.name).tracks }
+  const ins = insertMedia(base, c.mediaId, 0)
+  if (!ins.id) return null
+  const withSubs = (p.words[c.mediaId]?.length ?? 0) > 0 ? addSubtitles(ins.p, [ins.id]) : ins.p
+  return cropProject(withSubs, c.start, c.end)
 }
 
 /** Рамки в порядке на таймлайне (потом те, что без видео — по времени исходника). */

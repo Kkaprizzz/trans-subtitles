@@ -5,6 +5,7 @@ import {
   addClip,
   clipFileBase,
   clipSubtitleStyle,
+  clipSourceProject,
   clipText,
   cropProject,
   deleteClip,
@@ -14,6 +15,7 @@ import {
   orderedClips,
   patchClip,
   placement,
+  rememberPlaces,
   putClips,
   rulerStep,
   setClipEdge,
@@ -217,5 +219,48 @@ assert.equal(xToTime(20, v), 11)
 assert.equal(rulerStep(100), 1)
 const z = zoomAt(v, 2, 100, 1, 1000)
 assert.equal(xToTime(100, z), xToTime(100, v), 'время под курсором на месте')
+
+// --- рамка без видео: запоминает место, остаётся серой, режется из файла
+{
+  let q = newProject('r')
+  const a = addMedia(q, V('/r.mp4', 60))
+  q = insertMedia(a.p, a.id, 0).p
+  const clip = makeClip(a.id, 10, 30)
+  q = { ...q, clips: [clip], words: { [a.id]: [{ id: 0, text: 'раз', start: 11, end: 12 }, { id: 1, text: 'два', start: 20, end: 21 }, { id: 2, text: 'мимо', start: 40, end: 41 }] } }
+  assert.deepEqual(placement(q, clip) && { s: placement(q, clip).start, e: placement(q, clip).end }, { s: 10, e: 30 })
+  assert.equal(rememberPlaces(q, q), q, 'ничего не менялось — тот же проект')
+  // видео убрали: рамка запомнила место
+  const gone = rememberPlaces(q, deleteItems(q, [q.items[0].id]))
+  assert.equal(placement(gone, gone.clips[0]), null, 'на таймлайне места нет')
+  assert.deepEqual(gone.clips[0].lastAt, { start: 10, end: 30 }, 'но место запомнено')
+  // правка проекта без видео память не стирает
+  const edited = rememberPlaces(gone, { ...gone, name: 'другое' })
+  assert.deepEqual(edited.clips[0].lastAt, { start: 10, end: 30 })
+  // вернули видео: память стирается, рамка снова по видео
+  const back = rememberPlaces(gone, insertMedia(gone, a.id, 5).p)
+  assert.equal(back.clips[0].lastAt, null)
+  assert.equal(placement(back, back.clips[0]).start, 15, 'встала по новому месту видео')
+  // файл проекта: память читается и чистится
+  const saved = sanitizeProject(JSON.parse(JSON.stringify(gone)))
+  assert.deepEqual(saved.clips[0].lastAt, { start: 10, end: 30 })
+  const junk = sanitizeProject(JSON.parse(JSON.stringify({ ...gone, clips: [{ ...gone.clips[0], lastAt: { start: 'x', end: -3 } }] })))
+  assert.equal(junk.clips[0].lastAt, null)
+  // клип из файла: видео 20 с в начале и субтитры из слов диапазона (время клипа от нуля), чужие слова не попадают
+  const cp = clipSourceProject(gone, gone.clips[0])
+  assert.equal(cp.items.filter((i) => i.kind === 'media').length, 1)
+  assert.equal(cp.items.find((i) => i.kind === 'media').in, 10, 'диапазон из файла'); assert.equal(cp.items.find((i) => i.kind === 'media').out, 30, 'до конца клипа')
+  assert.equal(cp.items.find((i) => i.kind === 'media').start, 0)
+  assert.equal(cp.clips.length, 0, 'проект из одного клипа')
+  const words = subtitleLayers(cp).flatMap((l) => l.words)
+  assert.deepEqual(words.map((w) => [w.text, w.start]), [['раз', 1], ['два', 10]], 'слова клипа сдвинуты к нулю')
+  // у файла нет слов: только видео
+  const noWords = clipSourceProject({ ...gone, words: {} }, gone.clips[0])
+  assert.equal(noWords.items.some((i) => i.kind === 'subs'), false)
+  // файла в проекте уже нет — резать нечего
+  assert.equal(clipSourceProject(removeMedia(gone, a.id), gone.clips[0]), null)
+  // экспорт собирается как обычно: картинка и звук от 0 до 20 с
+  const cmd = buildExport(cp, { W: 1080, H: 1920, fps: 30, format: 'h264', quality: 'small', subLayers: [], framing: { mediaId: a.id, mode: 'crop', offsetX: 0.5 } }, '/o.mp4')
+  assert.equal(cmd.total, 20)
+}
 
 console.log('cut.ts: все проверки прошли')

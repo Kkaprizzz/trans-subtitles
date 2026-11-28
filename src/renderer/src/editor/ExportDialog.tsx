@@ -1,7 +1,7 @@
 /** Диалог экспорта таймлайна одним файлом. */
 import { useEffect, useMemo, useState } from 'react'
 import { orderedClips } from '../../../shared/cut'
-import { projectDuration, timelineWords, type Project } from '../../../shared/project'
+import { mediaOf, projectDuration, timelineWords, type Project } from '../../../shared/project'
 import type { ClipsExportResult, ExportRequest, ExportResult, H264Quality, ProgressEvent, RenderFormat } from '../../../shared/types'
 import { fmtTime } from '../format'
 
@@ -31,11 +31,12 @@ export default function ExportDialog(p: Props): React.JSX.Element {
   const [clipsResult, setClipsResult] = useState<ClipsExportResult | null>(null)
   // режим «Папка клипов»: список рамок с галочками (по умолчанию — включённые и стоящие на таймлайне)
   const list = useMemo(() => orderedClips(p.project), [p.project])
-  const [mode, setMode] = useState<'timeline' | 'clips'>('timeline')
-  const [picked, setPicked] = useState<Set<string>>(() => new Set(orderedClips(p.project).filter((c) => c.clip.enabled && c.at).map((c) => c.clip.id)))
+  const [mode, setMode] = useState<'timeline' | 'clips'>(p.project.items.length === 0 ? 'clips' : 'timeline')
+  const [picked, setPicked] = useState<Set<string>>(() => new Set(orderedClips(p.project).filter((c) => c.clip.enabled && (c.at || mediaOf(p.project, c.clip.mediaId))).map((c) => c.clip.id)))
   const [writeText, setWriteText] = useState(true)
   const cv = p.project.canvas ?? { w: 1920, h: 1080 }
-  const hasSubs = timelineWords(p.project).length > 0
+  // субтитры есть на таймлайне или у клипа без видео — слова его файла (клип режется из файла вместе с ними)
+  const hasSubs = timelineWords(p.project).length > 0 || orderedClips(p.project).some((c) => !c.at && (p.project.words[c.clip.mediaId]?.length ?? 0) > 0)
   const dur = projectDuration(p.project)
 
   // значения по умолчанию — из настроек приложения (раздел «Экспорт»)
@@ -51,7 +52,7 @@ export default function ExportDialog(p: Props): React.JSX.Element {
     p.onBusy(true)
     try {
       const r = await window.api.exportClips(p.project, {
-        clipIds: list.filter((c) => picked.has(c.clip.id) && c.at).map((c) => c.clip.id),
+        clipIds: list.filter((c) => picked.has(c.clip.id) && (c.at || mediaOf(p.project, c.clip.mediaId))).map((c) => c.clip.id),
         quality: s.quality,
         burnSubtitles: s.burn && hasSubs,
         writeText
@@ -105,7 +106,7 @@ export default function ExportDialog(p: Props): React.JSX.Element {
         <div className="modal-body">
           {list.length > 0 && (
             <div className="seg" role="radiogroup" aria-label="Что экспортировать">
-              <button role="radio" aria-checked={mode === 'timeline'} className={mode === 'timeline' ? 'on' : ''} onClick={() => setMode('timeline')} disabled={busy}>
+              <button role="radio" aria-checked={mode === 'timeline'} className={mode === 'timeline' ? 'on' : ''} onClick={() => setMode('timeline')} disabled={busy || p.project.items.length === 0}>
                 Весь таймлайн
               </button>
               <button role="radio" aria-checked={mode === 'clips'} className={mode === 'clips' ? 'on' : ''} onClick={() => setMode('clips')} disabled={busy}>
@@ -122,8 +123,8 @@ export default function ExportDialog(p: Props): React.JSX.Element {
                     <label className="check">
                       <input
                         type="checkbox"
-                        checked={picked.has(clip.id) && !!at}
-                        disabled={!at || busy}
+                        checked={picked.has(clip.id) && (!!at || !!mediaOf(p.project, clip.mediaId))}
+                        disabled={(!at && !mediaOf(p.project, clip.mediaId)) || busy}
                         onChange={(e) =>
                           setPicked((x) => {
                             const n = new Set(x)
@@ -137,7 +138,7 @@ export default function ExportDialog(p: Props): React.JSX.Element {
                         {String(i + 1).padStart(2, '0')} · {clip.title || 'Без названия'}
                       </span>
                     </label>
-                    <span className="mono dim">{at ? `${(at.end - at.start).toFixed(0)} с` : 'видео убрано'}</span>
+                    <span className="mono dim">{at ? `${(at.end - at.start).toFixed(0)} с` : mediaOf(p.project, clip.mediaId) ? `${(clip.end - clip.start).toFixed(0)} с · из файла` : 'файла нет'}</span>
                   </li>
                 ))}
               </ul>
@@ -251,7 +252,7 @@ export default function ExportDialog(p: Props): React.JSX.Element {
               Отменить
             </button>
           ) : mode === 'clips' ? (
-            <button className="btn primary" onClick={() => void runClips()} disabled={!list.some((c) => picked.has(c.clip.id) && c.at)}>
+            <button className="btn primary" onClick={() => void runClips()} disabled={!list.some((c) => picked.has(c.clip.id) && (c.at || mediaOf(p.project, c.clip.mediaId)))}>
               Экспортировать клипы
             </button>
           ) : (

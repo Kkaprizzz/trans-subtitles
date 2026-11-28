@@ -12,7 +12,7 @@ import type { DlTask } from '../../../shared/download'
 import type { BannerEntry } from '../../../shared/types'
 import type { Plate } from '../../../shared/plate'
 import type { EffectType } from '../../../shared/effects'
-import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips } from '../../../shared/cut'
+import { fromCandidates, addClip, deleteClip, patchClip, placement, putClips, rememberPlaces } from '../../../shared/cut'
 import { emptyHist, histReducer, type Hist, type HistAction } from '../../../shared/history'
 import {
   addMarker,
@@ -108,6 +108,8 @@ export interface EditorState {
   canRedo: boolean
   hasSel: boolean
   hasItems: boolean
+  /** есть что экспортировать: куски или рамки клипов с запомненным местом */
+  canExport: boolean
   /** в буфере есть куски для вставки */
   canPaste: boolean
   duration: number
@@ -341,7 +343,8 @@ export default function Editor(p: Props): React.JSX.Element {
   projectRef.current = project
 
   const commit = useCallback((next: Project, key?: string) => {
-    dispatch({ type: 'commit', words: next, key, now: Date.now() })
+    // рамка клипа, у которого видео убрали с таймлайна, запоминает своё место и остаётся серой
+    dispatch({ type: 'commit', words: rememberPlaces(projectRef.current, next), key, now: Date.now() })
     setViewing((v) => (v ? null : v))
   }, [])
   const duration = projectDuration(project)
@@ -349,6 +352,11 @@ export default function Editor(p: Props): React.JSX.Element {
   const layers = useMemo(() => subtitleLayers(project), [project.items, project.words, project.tracks]) // eslint-disable-line react-hooks/exhaustive-deps
   const style = useMemo(() => normalizeStyle(project.style ?? DEFAULT_STYLE), [project.style])
   const clipsPlaced = useMemo(() => project.clips.map((clip) => ({ clip, at: placement(project, clip) })), [project.clips, project.items]) // eslint-disable-line react-hooks/exhaustive-deps
+  // для таймлайна: клип без видео стоит серой рамкой на запомненном месте (away); без запомненного места рамки нет
+  const clipsShown = useMemo(
+    () => clipsPlaced.map((c) => (c.at || !c.clip.lastAt ? { ...c, away: false } : { clip: c.clip, at: { start: c.clip.lastAt.start, end: c.clip.lastAt.end, itemId: '' }, away: true })),
+    [clipsPlaced]
+  )
   const focusClip = focusClipId ? project.clips.find((c) => c.id === focusClipId) : undefined
   const focusAt = focusClip ? placement(project, focusClip) : null
   const focusRange = focusAt ? { start: focusAt.start, end: focusAt.end } : null
@@ -1279,7 +1287,7 @@ export default function Editor(p: Props): React.JSX.Element {
     },
     addMedia: () => void importFiles(),
     download: () => setDlOpen(true),
-    exportVideo: () => duration > 0 && setExportOpen(true),
+    exportVideo: () => (duration > 0 || projectRef.current.clips.some((c) => c.lastAt)) && setExportOpen(true),
     close: back,
     undo,
     redo,
@@ -1316,6 +1324,7 @@ export default function Editor(p: Props): React.JSX.Element {
       canRedo: hist.future.length > 0,
       hasSel: selected.length > 0,
       hasItems: project.items.length > 0,
+      canExport: project.items.length > 0 || project.clips.some((c) => c.lastAt),
       canPaste: clipCount > 0,
       duration,
       status,
@@ -1523,7 +1532,7 @@ export default function Editor(p: Props): React.JSX.Element {
           onWordPick={onWordPick}
           markerPopId={markerPopId}
           onMarkerPop={setMarkerPopId}
-          clips={clipsPlaced}
+          clips={clipsShown}
           selectedClip={selectedClip}
           onSelectClip={onSelectClip}
           onClipOpen={enterFocus}

@@ -7,9 +7,9 @@ import { app } from 'electron'
 import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { CLIP_H, CLIP_W, clipFileBase, clipSubtitleStyle, clipText, cropProject, orderedClips } from '../shared/cut'
+import { CLIP_H, CLIP_W, clipFileBase, clipSourceProject, clipSubtitleStyle, clipText, cropProject, orderedClips } from '../shared/cut'
 import { buildExport, type FramingOpt, type SubLayerInput, type TextLayerInput } from '../shared/exportGraph'
-import { itemEnd, projectDuration, subtitleLayers, timelineWords, type Project } from '../shared/project'
+import { itemEnd, mediaOf, projectDuration, subtitleLayers, timelineWords, type Project } from '../shared/project'
 import { DEFAULT_STYLE, normalizeStyle, type SubtitleStyle } from '../shared/timeline'
 import type { ClipsExportRequest, ClipsExportResult, ExportRequest, ExportResult, ProgressEvent } from '../shared/types'
 import { AV1_FALLBACK, ffmpegErrorText } from '../shared/ffmpeg'
@@ -144,8 +144,9 @@ export async function exportClips(
   const started = Date.now()
   const chosen = orderedClips(p).filter((c) => req.clipIds.includes(c.clip.id))
   if (chosen.length === 0) throw new Error('Не выбрано ни одного клипа')
-  const missing = chosen.find((c) => !c.at)
-  if (missing) throw new Error(`Клипа «${missing.clip.title || 'без названия'}» нет на таймлайне — вернуть видео или снять галочку`)
+  // клип без видео на таймлайне режется из своего файла; ошибка — только если и файла в проекте уже нет
+  const missing = chosen.find((c) => !c.at && !mediaOf(p, c.clip.mediaId))
+  if (missing) throw new Error(`Файла клипа «${missing.clip.title || 'без названия'}» уже нет в проекте — сними галочку`)
   await mkdir(dir, { recursive: true })
   const style = clipSubtitleStyle(normalizeStyle(p.style ?? DEFAULT_STYLE))
   const files: string[] = []
@@ -154,10 +155,9 @@ export async function exportClips(
   for (let k = 0; k < chosen.length; k++) {
     if (cancel.cancelled) throw new Error('Отменено')
     const { clip, at } = chosen[k]
-    const a = at as NonNullable<typeof at>
     const base = clipFileBase(k, clip)
     const out = join(dir, `${base}.mp4`)
-    const cp = cropProject(p, a.start, a.end)
+    const cp = at ? cropProject(p, at.start, at.end) : (clipSourceProject(p, clip) as Project)
     await renderCore(
       cp,
       { W: CLIP_W, H: CLIP_H, fps: p.fps, format: 'h264', quality: req.quality, burn: req.burnSubtitles, style, framing: { mediaId: clip.mediaId, mode: clip.framing, offsetX: clip.offsetX } },

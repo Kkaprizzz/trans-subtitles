@@ -123,6 +123,8 @@ export interface Clip {
   offsetX: number
   /** попадает ли клип в экспорт папкой */
   enabled: boolean
+  /** где рамка стояла на таймлайне, когда видео с него убрали (секунды таймлайна); рамка остаётся серой на этом месте */
+  lastAt?: { start: number; end: number } | null
 }
 
 export const MARKER_COLORS = 6
@@ -856,6 +858,14 @@ const str = (x: unknown, d = ''): string => (typeof x === 'string' ? x : d)
 const r4 = (x: number): number => Math.round(x * 1000) / 1000
 
 /** Рамки из файла: битые выбрасываем, поля приводим к типам, границы — в пределах файла, без пересечений в одном файле. */
+function sanitizeLastAt(raw: unknown): { start: number; end: number } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const start = num(r.start, -1)
+  const end = num(r.end, -1)
+  return start >= 0 && end > start ? { start: r4(start), end: r4(end) } : null
+}
+
 function sanitizeClips(raw: unknown, media: MediaRef[]): Clip[] {
   if (!Array.isArray(raw)) return []
   const dur = new Map(media.map((m) => [m.id, m.duration]))
@@ -883,7 +893,8 @@ function sanitizeClips(raw: unknown, media: MediaRef[]): Clip[] {
       note: text(c.note, 400),
       framing: c.framing === 'fit-blur' ? 'fit-blur' : 'crop',
       offsetX: Math.min(1, Math.max(0, num(c.offsetX, 0.5))),
-      enabled: c.enabled !== false
+      enabled: c.enabled !== false,
+      lastAt: sanitizeLastAt(c.lastAt)
     })
   }
   // рамки одного файла не пересекаются: нахлёст обрезаем по началу следующей

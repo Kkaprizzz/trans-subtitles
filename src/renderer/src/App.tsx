@@ -136,7 +136,7 @@ export default function App(): React.JSX.Element {
         'sep',
         { label: 'Добавить медиа…', shortcut: 'Ctrl+I', disabled: !inEditor, action: () => c()?.addMedia() },
         { label: 'Скачать по ссылке…', disabled: !inEditor, action: () => c()?.download() },
-        { label: 'Экспорт видео…', shortcut: 'Ctrl+E', disabled: !inEditor || !ed?.hasItems, action: () => c()?.exportVideo() },
+        { label: 'Экспорт видео…', shortcut: 'Ctrl+E', disabled: !inEditor || !ed?.canExport, action: () => c()?.exportVideo() },
         'sep',
         { label: 'Закрыть проект', shortcut: 'Ctrl+W', disabled: !inEditor, action: () => void c()?.close() },
         { label: 'Выход', shortcut: 'Ctrl+Q', action: () => void quit() }
@@ -228,7 +228,7 @@ export default function App(): React.JSX.Element {
           </button>
         )}
         {inEditor && (
-          <button className="btn primary" onClick={() => c()?.exportVideo()} disabled={!ed.hasItems} title="Экспорт видео (Ctrl+E)">
+          <button className="btn primary" onClick={() => c()?.exportVideo()} disabled={!ed.canExport} title="Экспорт видео (Ctrl+E)">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
               <path d="M12 15V3M7 8l5-5 5 5M5 14v6h14v-6" />
             </svg>

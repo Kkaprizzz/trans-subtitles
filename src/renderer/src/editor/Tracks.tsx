@@ -81,7 +81,7 @@ interface Props {
   markerPopId: string | null
   onMarkerPop(id: string | null): void
   /** рамки клипов с местом на таймлайне (null — видео с этим отрезком нет на таймлайне) */
-  clips: Array<{ clip: Clip; at: Placement | null }>
+  clips: Array<{ clip: Clip; at: Placement | null; /** видео убрано с таймлайна: серая рамка на запомненном месте */ away?: boolean }>
   selectedClip: string | null
   onSelectClip(id: string | null): void
   onClipOpen(id: string): void
@@ -1183,30 +1183,37 @@ function Tracks(p: Props): React.JSX.Element {
         ))}
         {clipsTop !== null && <div className="tr-lane clips" style={{ top: clipsTop, height: H_CLIPS }} />}
         {clipsTop !== null &&
-          p.clips.map(({ clip, at }) => {
+          p.clips.map(({ clip, at, away }) => {
             if (!at || at.end < view.start || at.start > tEnd) return null
             const visFrom = Math.max(at.start, view.start - 1 / view.pps)
             const visTo = Math.min(at.end, tEnd + 1 / view.pps)
             const left = timeToX(visFrom, view)
             const width = Math.max(4, (visTo - visFrom) * view.pps)
             const sel = p.selectedClip === clip.id
-            const cls = `tr-clip${sel ? ' sel' : ''}${clip.enabled ? '' : ' off'}${clip.note ? ' note' : ''}${clip.approx ? ' approx' : ''}`
+            const cls = `tr-clip${sel ? ' sel' : ''}${clip.enabled ? '' : ' off'}${clip.note ? ' note' : ''}${clip.approx ? ' approx' : ''}${away ? ' away' : ''}`
             return (
               <div
                 key={clip.id}
                 className={cls}
                 style={{ left, width, top: clipsTop, height: H_CLIPS }}
-                onPointerDown={(e) => startClip(e, clip, 'move')}
-                onDoubleClick={() => p.onClipOpen(clip.id)}
-                title={`${clip.title || 'Клип'} · ${(clip.end - clip.start).toFixed(1)} с${clip.note ? `\nПодсказка ИИ: ${clip.note}` : ''}\nДвойной щелчок — фокус на клипе`}
+                onPointerDown={(e) => {
+                  // серую рамку (видео убрано) можно выбрать, но не двигать: место ей даёт видео
+                  if (!away) return startClip(e, clip, 'move')
+                  if (e.button !== 0) return
+                  e.stopPropagation()
+                  p.onMarkerPop(null)
+                  p.onSelectClip(clip.id)
+                }}
+                onDoubleClick={() => !away && p.onClipOpen(clip.id)}
+                title={`${clip.title || 'Клип'} · ${(clip.end - clip.start).toFixed(1)} с${away ? '\nВидео убрано с таймлайна: рамка на запомненном месте, экспорт — из файла' : `${clip.note ? `\nПодсказка ИИ: ${clip.note}` : ''}\nДвойной щелчок — фокус на клипе`}`}
               >
-                {visFrom === at.start && <span className="tr-edge l" onPointerDown={(e) => startClip(e, clip, 'start')} />}
+                {!away && visFrom === at.start && <span className="tr-edge l" onPointerDown={(e) => startClip(e, clip, 'start')} />}
                 {width > 40 && (
                   <span className="tr-clip-label">
-                    {clip.title || 'Клип'} <span className="mono">{(clip.end - clip.start).toFixed(0)} с</span>
+                    {clip.title || 'Клип'} <span className="mono">{(clip.end - clip.start).toFixed(0)} с{away ? ' · видео не на таймлайне' : ''}</span>
                   </span>
                 )}
-                {visTo === at.end && <span className="tr-edge r" onPointerDown={(e) => startClip(e, clip, 'end')} />}
+                {!away && visTo === at.end && <span className="tr-edge r" onPointerDown={(e) => startClip(e, clip, 'end')} />}
               </div>
             )
           })}
